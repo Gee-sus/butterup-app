@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ButterUp API Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .result { margin: 10px 0; padding: 10px; border: 1px solid #ccc; }
+        .success { background-color: #d4edda; border-color: #c3e6cb; }
+        .error { background-color: #f8d7da; border-color: #f5c6cb; }
+    </style>
+</head>
+<body>
+    <h1>ButterUp API Test</h1>
+    <div id="results"></div>
+    
+    <script>
+        async function testAPI() {
+            const resultsDiv = document.getElementById('results');
+            
+            // Test 1: Backend API
+            try {
+                console.log('Testing backend API...');
+                const response = await fetch('http://127.0.0.1:8000/api/products/');
+                const data = await response.json();
+                
+                resultsDiv.innerHTML += `
+                    <div class="result success">
+                        <h3>✅ Backend API Test</h3>
+                        <p>Status: ${response.status}</p>
+                        <p>Total Products: ${data.count || 0}</p>
+                        <p>Results: ${data.results ? data.results.length : 0}</p>
+                        <details>
+                            <summary>First Product</summary>
+                            <pre>${JSON.stringify(data.results?.[0] || {}, null, 2)}</pre>
+                        </details>
+                    </div>
+                `;
+            } catch (error) {
+                resultsDiv.innerHTML += `
+                    <div class="result error">
+                        <h3>❌ Backend API Test Failed</h3>
+                        <p>Error: ${error.message}</p>
+                    </div>
+                `;
+            }
+            
+            // Test 2: Frontend API (if proxy is working)
+            try {
+                console.log('Testing frontend proxy...');
+                const response = await fetch('/api/products/');
+                const data = await response.json();
+                
+                resultsDiv.innerHTML += `
+                    <div class="result success">
+                        <h3>✅ Frontend Proxy Test</h3>
+                        <p>Status: ${response.status}</p>
+                        <p>Products: ${data.results ? data.results.length : 0}</p>
+                    </div>
+                `;
+            } catch (error) {
+                resultsDiv.innerHTML += `
+                    <div class="result error">
+                        <h3>❌ Frontend Proxy Test Failed</h3>
+                        <p>Error: ${error.message}</p>
+                        <p>This is expected if using direct API calls</p>
+                    </div>
+                `;
+            }
+            
+            // Test 3: Check localStorage
+            const storeData = localStorage.getItem('butterup:selectedStore');
+            const storeId = localStorage.getItem('butterup:storeId');
+            
+            resultsDiv.innerHTML += `
+                <div class="result">
+                    <h3>📱 LocalStorage Check</h3>
+                    <p>butterup:selectedStore: ${storeData || 'null'}</p>
+                    <p>butterup:storeId: ${storeId || 'null'}</p>
+                </div>
+            `;
+        }
+        
+        // Run tests
+        testAPI();
+    </script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+{
+    "include": [
+        "."
+    ],
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__"
+    ],
+    "venvPath": ".",
+    "venv": "venv",
+    "pythonPath": "./venv/Scripts/python.exe",
+    "pythonVersion": "3.10",
+    "pythonPlatform": "Windows",
+    "executionEnvironments": [
+        {
+            "root": ".",
+            "pythonVersion": "3.10",
+            "pythonPlatform": "Windows",
+            "extraPaths": [
+                ".",
+                "venv/Lib/site-packages",
+                "venv/Scripts"
+            ],
+            "env": {
+                "DJANGO_SETTINGS_MODULE": "butter_tracker.settings"
+            }
+        }
+    ],
+    "typeCheckingMode": "basic",
+    "useLibraryCodeForTypes": true,
+    "autoSearchPaths": true,
+    "autoImportCompletions": true,
+    "reportMissingImports": "warning",
+    "reportMissingTypeStubs": false
+}

@@ -1,0 +1,27 @@
+{
+  "products": [
+    {
+      "name": "Pams Pure Butter 500g",
+      "price": 4.99,
+      "brand": "Unknown",
+      "weight_grams": 500,
+      "source": "user_verified"
+    },
+    {
+      "name": "Anchor Butter 500g",
+      "price": 6.5,
+      "brand": "Unknown",
+      "weight_grams": 500,
+      "source": "user_verified"
+    },
+    {
+      "name": "Mainland Butter 500g",
+      "price": 7.5,
+      "brand": "Unknown",
+      "weight_grams": 500,
+      "source": "user_verified"
+    }
+  ],
+  "last_updated": "2025-09-13T13:31:40.893162",
+  "sources": {}
+}

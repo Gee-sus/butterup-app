@@ -1,0 +1,63 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+.env/
+
+# Database
+*.sqlite3
+db.sqlite3
+
+# Django
+*.log
+media/
+staticfiles/
+
+# Expo & React Native
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+.metro-health-check*
+
+# Build outputs
+build/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.local
+.env*.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Certificates & Keys
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.mobileprovision
+
+# Temporary files
+*.tmp
+*.temp
+debug.log
+
+# Executables
+*.exe

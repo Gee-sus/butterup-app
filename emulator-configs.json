@@ -1,0 +1,168 @@
+{
+  "recommended_android_avds": [
+    {
+      "name": "ButterUp_Pixel7",
+      "device": "Pixel 7",
+      "api_level": 33,
+      "target": "Google APIs",
+      "cpu_arch": "x86_64",
+      "ram": 4096,
+      "internal_storage": 8192,
+      "sd_card": 1024,
+      "description": "Modern Android device - Best for current app testing",
+      "use_case": "Primary testing device"
+    },
+    {
+      "name": "ButterUp_Pixel6",
+      "device": "Pixel 6",
+      "api_level": 32,
+      "target": "Google APIs",
+      "cpu_arch": "x86_64", 
+      "ram": 3072,
+      "internal_storage": 6144,
+      "sd_card": 512,
+      "description": "Popular Android device - Good performance balance",
+      "use_case": "Secondary testing device"
+    },
+    {
+      "name": "ButterUp_Tablet",
+      "device": "Pixel C",
+      "api_level": 33,
+      "target": "Google APIs",
+      "cpu_arch": "x86_64",
+      "ram": 4096,
+      "internal_storage": 8192,
+      "sd_card": 1024,
+      "description": "Android tablet - Test larger screen layouts",
+      "use_case": "Tablet layout testing"
+    }
+  ],
+  
+  "recommended_ios_simulators": [
+    {
+      "name": "iPhone 15 Pro",
+      "ios_version": "17.0",
+      "screen_size": "6.1 inch",
+      "resolution": "2556×1179",
+      "description": "Latest iPhone - Test newest iOS features",
+      "use_case": "Primary iOS testing"
+    },
+    {
+      "name": "iPhone 14",
+      "ios_version": "16.0",
+      "screen_size": "6.1 inch", 
+      "resolution": "2532×1170",
+      "description": "Popular iPhone model - Most common device",
+      "use_case": "Common device testing"
+    },
+    {
+      "name": "iPhone SE (3rd generation)",
+      "ios_version": "16.0",
+      "screen_size": "4.7 inch",
+      "resolution": "1334×750",
+      "description": "Smaller screen - Test compact layouts",
+      "use_case": "Small screen testing"
+    },
+    {
+      "name": "iPad Air (5th generation)",
+      "ios_version": "16.0",
+      "screen_size": "10.9 inch",
+      "resolution": "2360×1640",
+      "description": "iPad - Test tablet layouts and navigation",
+      "use_case": "Tablet testing"
+    }
+  ],
+
+  "testing_scenarios": [
+    {
+      "scenario": "Basic Functionality",
+      "devices": ["ButterUp_Pixel7", "iPhone 15 Pro"],
+      "tests": [
+        "App launch and splash screen",
+        "Navigation between screens",
+        "Store selection functionality",
+        "Product list display",
+        "Price comparison features"
+      ]
+    },
+    {
+      "scenario": "Location Services",
+      "devices": ["ButterUp_Pixel7", "iPhone 14"],
+      "tests": [
+        "GPS permission request",
+        "Location-based store finding",
+        "Map integration",
+        "Distance calculations"
+      ]
+    },
+    {
+      "scenario": "Network Conditions",
+      "devices": ["ButterUp_Pixel6", "iPhone 14"],
+      "tests": [
+        "Slow 3G simulation",
+        "Offline mode handling",
+        "API timeout handling",
+        "Data loading states"
+      ]
+    },
+    {
+      "scenario": "Screen Sizes",
+      "devices": ["iPhone SE", "ButterUp_Tablet", "iPad Air"],
+      "tests": [
+        "Responsive layout adaptation",
+        "Button accessibility",
+        "Text readability",
+        "Image scaling"
+      ]
+    }
+  ],
+
+  "performance_settings": {
+    "android_emulator": {
+      "recommended_specs": {
+        "host_ram": "16GB+",
+        "host_cpu": "Intel i5/AMD Ryzen 5+",
+        "host_storage": "SSD preferred"
+      },
+      "optimization": {
+        "hardware_acceleration": true,
+        "gpu_acceleration": "auto",
+        "multi_core_cpu": true,
+        "cold_boot": false
+      }
+    },
+    "ios_simulator": {
+      "recommended_specs": {
+        "host_ram": "8GB+",
+        "host_cpu": "Apple Silicon or Intel i5+",
+        "host_storage": "SSD preferred"
+      },
+      "optimization": {
+        "metal_performance": true,
+        "device_bezels": false,
+        "fit_to_screen": true
+      }
+    }
+  },
+
+  "development_workflow": {
+    "rapid_development": {
+      "method": "Expo Go",
+      "platforms": ["Physical Android", "Physical iOS"],
+      "pros": ["Instant updates", "Real device testing", "Easy setup"],
+      "cons": ["Limited to Expo SDK", "Requires physical device"]
+    },
+    "full_testing": {
+      "method": "Emulators",
+      "platforms": ["Android Emulator", "iOS Simulator"],
+      "pros": ["Full native experience", "Device variety", "Debug tools"],
+      "cons": ["Slower updates", "More resource intensive"]
+    },
+    "web_preview": {
+      "method": "Web browser",
+      "platforms": ["Chrome", "Safari", "Firefox"],
+      "pros": ["Fastest iteration", "Easy debugging", "Cross-platform"],
+      "cons": ["Not fully native", "Limited mobile features"]
+    }
+  }
+}
