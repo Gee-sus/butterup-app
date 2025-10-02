@@ -106,7 +106,7 @@ const getBrandDisplayName = (product: any) => {
 export default function HomeScreen() {
   const navigation = useNavigation();
 
-  const { addToList, list, userProfile, loadUserProfile } = useApp();
+  const { addToList, list, userProfile, loadUserProfile, showSnackbar } = useApp();
 
   const insets = useSafeAreaInsets();
 
@@ -197,13 +197,23 @@ export default function HomeScreen() {
   };
 
   const handleAddToList = (product: any) => {
+    const isAlreadyInList = list.some(item => item.id === product.id);
+    
     addToList({
       id: product.id,
-
       name: product.name_with_brand,
-
-      price: product.price,
+      brand: product.brand,
+      price: product.price || 0,
+      image_url: product.image_url,
+      store: product.store || product.brand || 'Unknown Store',
+      weight: product.weight,
+      savings: product.savings,
+      worst_price: product.worst_price,
     });
+    
+    if (!isAlreadyInList) {
+      showSnackbar(`${product.name_with_brand} added to your list!`);
+    }
   };
 
   const loadQuickCompare = async () => {
@@ -410,41 +420,52 @@ export default function HomeScreen() {
     setTooltipVisible(true);
   };
 
-  const renderHorizontalProductItem = (item: any) => (
-    <TouchableOpacity
-      style={styles.horizontalProductCard}
-      onPress={() => handleProductPress(item)}
-    >
-      {item.image_url && (
-        <Image
-          source={{ uri: item.image_url }}
-          style={styles.horizontalProductImage}
-          resizeMode="cover"
-        />
-      )}
-
-      <View style={styles.horizontalProductInfo}>
-        <Text style={styles.horizontalProductName} numberOfLines={2}>
-          {item.name_with_brand}
-        </Text>
-
-        <Text style={styles.horizontalProductPrice}>
-          ${item.price.toFixed(2)}
-        </Text>
-
-        <Text style={styles.horizontalProductStore}>
-          {item.brand || item.store}
-        </Text>
-      </View>
-
+  const renderHorizontalProductItem = (item: any) => {
+    const isInList = list.some(listItem => listItem.id === item.id);
+    
+    return (
       <TouchableOpacity
-        style={styles.horizontalAddToCartButton}
-        onPress={() => handleAddToList(item)}
+        style={styles.horizontalProductCard}
+        onPress={() => handleProductPress(item)}
       >
-        <Text style={styles.horizontalAddToCartText}>+</Text>
+        {item.image_url && (
+          <Image
+            source={{ uri: item.image_url }}
+            style={styles.horizontalProductImage}
+            resizeMode="cover"
+          />
+        )}
+
+        <View style={styles.horizontalProductInfo}>
+          <Text style={styles.horizontalProductName} numberOfLines={2}>
+            {item.name_with_brand}
+          </Text>
+
+          <Text style={styles.horizontalProductPrice}>
+            ${item.price.toFixed(2)}
+          </Text>
+
+          <Text style={styles.horizontalProductStore}>
+            {item.brand || item.store}
+          </Text>
+        </View>
+
+        <TouchableOpacity
+          style={[
+            styles.horizontalAddToCartButton,
+            isInList && styles.horizontalAddToCartButtonAdded
+          ]}
+          onPress={() => handleAddToList(item)}
+        >
+          <Ionicons 
+            name={isInList ? "checkmark" : "add"} 
+            size={16} 
+            color="#ffffff" 
+          />
+        </TouchableOpacity>
       </TouchableOpacity>
-    </TouchableOpacity>
-  );
+    );
+  };
 
   const renderCompareRow = (
     brand: string,
@@ -820,11 +841,21 @@ export default function HomeScreen() {
 
           <TextInput
             style={styles.searchInput}
-            placeholder="Search for butter products..."
+            placeholder="Search your butter..."
             placeholderTextColor={tokens.colors.ink2}
             value={searchQuery}
             onChangeText={setSearchQuery}
           />
+          {searchQuery.length > 0 && (
+            <TouchableOpacity
+              onPress={() => setSearchQuery("")}
+              style={styles.searchClearBtn}
+              accessibilityLabel="Clear search"
+              activeOpacity={0.7}
+            >
+              <Ionicons name="close-circle" size={18} color={tokens.colors.ink2} />
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -865,11 +896,16 @@ export default function HomeScreen() {
 
             <View style={styles.cheapestActions}>
               <TouchableOpacity
-                style={styles.addButton}
+                style={[
+                  styles.addButton,
+                  list.some(item => item.id === cheapestProduct.id) && styles.addButtonAdded
+                ]}
                 onPress={() => handleAddToList(cheapestProduct)}
                 activeOpacity={0.85}
               >
-                <Text style={styles.addButtonText}>Add to list</Text>
+                <Text style={styles.addButtonText}>
+                  {list.some(item => item.id === cheapestProduct.id) ? 'In List' : 'Add to list'}
+                </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -1023,6 +1059,9 @@ const styles = StyleSheet.create({
 
     padding: 0,
   },
+  searchClearBtn: {
+    marginLeft: tokens.spacing.xs,
+  },
 
   cheapestCard: {
     backgroundColor: tokens.colors.card,
@@ -1162,6 +1201,10 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
 
     elevation: 4,
+  },
+
+  addButtonAdded: {
+    backgroundColor: "#059669", // Darker green for "added" state
   },
 
   addButtonText: {
@@ -1380,6 +1423,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
 
+  horizontalAddToCartButtonAdded: {
+    backgroundColor: "#10B981", // Keep the same green but could be different if needed
+  },
+
   horizontalAddToCartText: {
     color: "#ffffff",
 
@@ -1592,7 +1639,7 @@ const styles = StyleSheet.create({
 
   heatmapSpinner: {
     padding: tokens.spacing.sm,
-    borderRadius: tokens.radius.circle,
+    borderRadius: 50,
     backgroundColor: tokens.colors.bg,
   },
 

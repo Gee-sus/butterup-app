@@ -1,7 +1,7 @@
 from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated
+from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticated, AllowAny
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -10,13 +10,16 @@ from django.db.models import Avg, Min, Max, Count, Q
 from django.utils import timezone
 from datetime import timedelta
 from django.shortcuts import get_object_or_404
+from django.http import Http404
+from django.contrib.auth import get_user_model
 import logging
 from typing import List, Dict
 from collections import OrderedDict
 
 from .models import (
     Store, Product, Price, EconomicIndicator, PriceAlert, EmailSubscription,
-    ScrapingLog, ImageAsset, NutritionProfile, ListItem, PriceContribution
+    ScrapingLog, ImageAsset, NutritionProfile, ListItem, PriceContribution,
+    ProductScoreSnapshot, ProductUserRating
 )
 from .serializers import (
     StoreSerializer, ProductSerializer, PriceSerializer, EconomicIndicatorSerializer,
@@ -27,7 +30,8 @@ from .serializers import (
     ProductListSerializer, ListItemSerializer, ListItemCreateSerializer,
     PriceContributionSerializer, PriceContributionCreateSerializer, UserProfileSerializer,
     QuickCompareBrandSerializer, QuickCompareStoreSnapshotSerializer,
-    pick_image_url
+    ProductDetailSerializer, ProductUserRatingSerializer,
+    ProductRatingSubmissionSerializer, pick_image_url
 )
 from .services.image_cache import ImageCacheService
 from .services.off_client import OFFClient
@@ -35,6 +39,19 @@ from .services.gs1_client import GS1Client
 from .tasks import fetch_product_image
 
 logger = logging.getLogger(__name__)
+
+
+def _product_detail_queryset():
+    return (
+        Product.objects.filter(is_active=True)
+        .select_related('score_snapshot', 'nutrition_profile')
+        .prefetch_related(
+            'healthy_alternatives__score_snapshot',
+            'healthy_alternatives__nutrition_profile',
+            'prices__store',
+            'user_ratings__user'
+        )
+    )
 
 # -----------------------------
 # NEW: ensure serializers see the request (for absolute URLs)
@@ -765,3 +782,109 @@ class PriceContributionViewSet(RequestContextMixin, viewsets.ModelViewSet):
                 {'error': 'Failed to create price contribution'},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+class ProductDetailAPIView(RequestContextMixin, APIView):
+    """Retrieve full product detail payload including pricing and scores."""
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def _get_product(self, identifier: str) -> Product:
+        queryset = _product_detail_queryset()
+        filters = Q(slug__iexact=identifier)
+        if str(identifier).isdigit():
+            filters |= Q(pk=int(identifier))
+        product = queryset.filter(filters).first()
+        if not product:
+            raise Http404("Product not found")
+        return product
+
+    def get(self, request, slug: str):
+        product = self._get_product(slug)
+        serializer = ProductDetailSerializer(product, context={'request': request})
+        return Response(serializer.data)
+
+
+class ProductRatingSubmitAPIView(RequestContextMixin, APIView):
+    """Allow users (or demo guests) to submit ratings for a product."""
+    permission_classes = [AllowAny]
+
+    def _get_product(self, slug: str) -> Product:
+        queryset = _product_detail_queryset()
+        filters = Q(slug__iexact=slug)
+        if str(slug).isdigit():
+            filters |= Q(pk=int(slug))
+        product = queryset.filter(filters).first()
+        if not product:
+            raise Http404('Product not found')
+        return product
+
+    def _resolve_user(self, request, create_if_missing: bool = False):
+        if request.user and request.user.is_authenticated:
+            return request.user
+        username = None
+        headers = getattr(request, 'headers', {})
+        if headers:
+            username = headers.get('X-ButterUp-User') or headers.get('x-butterup-user')
+        if not username and isinstance(getattr(request, 'data', None), dict):
+            username = request.data.get('username')
+        if not username:
+            if not create_if_missing:
+                return None
+            username = 'butterup-guest'
+        UserModel = get_user_model()
+        try:
+            user = UserModel.objects.get(username=username)
+            return user
+        except UserModel.DoesNotExist:
+            if not create_if_missing:
+                return None
+        user, created = UserModel.objects.get_or_create(
+            username=username,
+            defaults={'email': f'{username}@example.com'}
+        )
+        if created:
+            user.set_unusable_password()
+            user.save(update_fields=['password'])
+        return user
+
+    def get(self, request, slug: str):
+        product = self._get_product(slug)
+        user = self._resolve_user(request, create_if_missing=False)
+        rating = None
+        if user:
+            rating = product.user_ratings.filter(user=user).first()
+        return Response({
+            'user_rating': ProductUserRatingSerializer(rating).data if rating else None,
+            'community_rating': product.get_user_rating_summary(),
+            'blended_score': product.get_blended_score(),
+            'system_scores': product.get_system_scores(),
+        })
+
+    def post(self, request, slug: str):
+        product = self._get_product(slug)
+        input_serializer = ProductRatingSubmissionSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        payload = input_serializer.validated_data
+        user = self._resolve_user(request, create_if_missing=True)
+
+        rating, _ = ProductUserRating.objects.update_or_create(
+            product=product,
+            user=user,
+            defaults={
+                'overall_score': payload.get('overall_score'),
+                'cost_score': payload.get('cost_score'),
+                'texture_score': payload.get('texture_score'),
+                'recipe_score': payload.get('recipe_score'),
+                'comment': payload.get('comment') or '',
+            }
+        )
+
+        product = self._get_product(slug)
+        detail_serializer = ProductDetailSerializer(
+            product,
+            context={'request': request, 'current_user': user}
+        )
+
+        return Response({
+            'rating': ProductUserRatingSerializer(rating).data,
+            'product': detail_serializer.data,
+        }, status=status.HTTP_200_OK)

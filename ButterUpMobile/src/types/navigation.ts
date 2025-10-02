@@ -8,6 +8,7 @@ export type RootStackParamList = {
   ProductDetail: {product?: Product} | undefined;
   History: undefined;
   Alerts: undefined;
+  Category: {category: string};
 };
 
 export type TabParamList = {

@@ -16,6 +16,7 @@ export const API_ENDPOINTS = {
   CHEAPEST: "/api/cheapest/",
   QUICK_COMPARE: "/api/quick-compare/",
   PROFILE: "/api/me/",
+  SCAN: "/api/scan/",
 } as const;
 
 // Full API URLs
@@ -26,4 +27,5 @@ export const API_URLS = {
   CHEAPEST: `${API_BASE_URL}${API_ENDPOINTS.CHEAPEST}`,
   QUICK_COMPARE: `${API_BASE_URL}${API_ENDPOINTS.QUICK_COMPARE}`,
   PROFILE: `${API_BASE_URL}${API_ENDPOINTS.PROFILE}`,
+  SCAN: `${API_BASE_URL}${API_ENDPOINTS.SCAN}`,
 } as const;

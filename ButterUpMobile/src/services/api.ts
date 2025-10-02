@@ -1,4 +1,5 @@
 import { API_URLS } from '../config';
+import { normalizeStoreName } from '../utils/stores';
 
 // Mock data - fallback when backend is not available
 const mockProducts = [
@@ -18,7 +19,7 @@ const mockProducts = [
     brand: 'Mainland',
     price: 7.29,
     weight: '500g',
-    store: 'Countdown',
+    store: 'Woolworths',
     name_with_brand: 'Mainland Butter 500g',
     image_url: 'https://images.unsplash.com/photo-1558642452-9d2a7deb7f62?w=300&h=300&fit=crop',
   },
@@ -58,13 +59,45 @@ const mockProducts = [
     brand: 'Petit Normand',
     price: 7.99,
     weight: '200g',
-    store: 'Countdown',
+    store: 'Woolworths',
     name_with_brand: 'Petit Normand 200g',
     image_url: 'https://images.unsplash.com/photo-1558642452-9d2a7deb7f62?w=300&h=300&fit=crop',
   },
 ];
 
 const MAIN_STORES = ["Pak'nSave", "Woolworths", "New World"];
+
+const buildHeaders = (guestUser?: string) => ({
+  'Content-Type': 'application/json',
+  ...(guestUser ? { 'X-ButterUp-User': guestUser } : {}),
+});
+
+const absolutizeImageUrl = (value?: string | null) => {
+  if (!value) {
+    return value;
+  }
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    return value;
+  }
+  const prefix = value.startsWith('/') ? '' : '/';
+  // For now, return the value as-is since API_BASE_URL is not defined
+  return `${prefix}${value}`;
+};
+
+const normaliseQuickCompareRows = (rows: any[]): any[] =>
+  Array.isArray(rows)
+    ? rows.map((row) => ({
+        ...row,
+        image_url: absolutizeImageUrl(row?.image_url),
+        stores: Array.isArray(row?.stores)
+          ? row.stores.map((store: any) => ({
+              ...store,
+              recorded_at: store?.recorded_at || null,
+            }))
+          : [],
+      }))
+    : []
+;
 
 const buildMockQuickCompare = () => {
   const byBrand = new Map<string, {
@@ -101,10 +134,8 @@ const buildMockQuickCompare = () => {
       entry.image_url = item.image_url || null;
     }
 
-    const storeLabel =
-      MAIN_STORES.find(
-        (store) => store.toLowerCase() === (item.store || '').toLowerCase(),
-      ) || item.store;
+    // Normalize the store name from the mock data
+    const storeLabel = normalizeStoreName(item.store || '');
 
     if (!storeLabel) {
       return;
@@ -190,7 +221,207 @@ export const userApi = {
   },
 };
 
+export type ProductRatingPayload = {
+  overall_score: number;
+  cost_score: number;
+  texture_score: number;
+  recipe_score: number;
+  comment?: string;
+};
+
+// New API methods for scan & submit functionality
+export const scanApi = {
+  // Uploads image, (lat,lng) optional; server identifies product
+  identifyByPhoto: async (fileUri: string, opts?: { lat?: number; lng?: number }) => {
+    try {
+      console.log(`[scanApi] Identifying product from photo: ${fileUri}`);
+      
+      // Create FormData for file upload
+      const formData = new FormData();
+      formData.append('image', {
+        uri: fileUri,
+        type: 'image/jpeg',
+        name: 'product_photo.jpg',
+      } as any);
+      
+      if (opts?.lat && opts?.lng) {
+        formData.append('lat', opts.lat.toString());
+        formData.append('lng', opts.lng.toString());
+      }
+
+      const response = await fetch(`${API_URLS.SCAN || 'http://localhost:8000/api/scan/'}identify/`, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`[scanApi] Product identified: ${data.name_with_brand}`);
+        return data;
+      }
+
+      console.warn(`[scanApi] Identify failed with status: ${response.status}`);
+      throw new Error(`Failed to identify product: ${response.status}`);
+    } catch (error) {
+      console.warn('[scanApi] Identify by photo failed:', error);
+      throw error;
+    }
+  },
+
+  // Fetches nearby store prices for a product id and location
+  nearbyPrices: async (productId: number, opts?: { lat?: number; lng?: number }) => {
+    try {
+      console.log(`[scanApi] Fetching nearby prices for product: ${productId}`);
+      
+      const params = new URLSearchParams();
+      params.append('product_id', productId.toString());
+      if (opts?.lat && opts?.lng) {
+        params.append('lat', opts.lat.toString());
+        params.append('lng', opts.lng.toString());
+      }
+
+      const response = await fetch(`${API_URLS.SCAN || 'http://localhost:8000/api/scan/'}nearby-prices/?${params}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`[scanApi] Found ${data.results?.length || data.length || 0} nearby prices`);
+        return data.results || data || [];
+      }
+
+      console.warn(`[scanApi] Nearby prices failed with status: ${response.status}`);
+      return []; // Return empty array for failed requests
+    } catch (error) {
+      console.warn('[scanApi] Nearby prices failed:', error);
+      return []; // Return empty array for failed requests
+    }
+  },
+
+  // Submits a user correction (photo+price+store), optional location
+  submitPriceCorrection: async (payload: {
+    product_id?: number;
+    store: string;
+    price: number;
+    imageUri: string;
+    lat?: number;
+    lng?: number;
+    note?: string;
+  }) => {
+    try {
+      console.log(`[scanApi] Submitting price correction for store: ${payload.store}`);
+      
+      const formData = new FormData();
+      formData.append('store', payload.store);
+      formData.append('price', payload.price.toString());
+      formData.append('image', {
+        uri: payload.imageUri,
+        type: 'image/jpeg',
+        name: 'price_photo.jpg',
+      } as any);
+      
+      if (payload.product_id) {
+        formData.append('product_id', payload.product_id.toString());
+      }
+      if (payload.lat && payload.lng) {
+        formData.append('lat', payload.lat.toString());
+        formData.append('lng', payload.lng.toString());
+      }
+      if (payload.note) {
+        formData.append('note', payload.note);
+      }
+
+      const response = await fetch(`${API_URLS.SCAN || 'http://localhost:8000/api/scan/'}submit/`, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`[scanApi] Price correction submitted successfully`);
+        return { ok: true, data };
+      }
+
+      console.warn(`[scanApi] Submit failed with status: ${response.status}`);
+      throw new Error(`Failed to submit correction: ${response.status}`);
+    } catch (error) {
+      console.warn('[scanApi] Submit price correction failed:', error);
+      throw error;
+    }
+  },
+};
+
 export const productApi = {
+  detail: async (slugOrId: string | number, guestUser?: string) => {
+    const identifier = String(slugOrId);
+    const url = `${API_URLS.PRODUCTS}${identifier}/detail/`;
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: buildHeaders(guestUser),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        return { data };
+      }
+      const message = await response.text();
+      return { data: null, error: new Error(message || `HTTP ${response.status}: ${response.statusText}`) };
+    } catch (error) {
+      console.warn('[api] Product detail failed:', error);
+      return { data: null, error: error as Error };
+    }
+  },
+
+  getRating: async (slugOrId: string | number, guestUser?: string) => {
+    const identifier = String(slugOrId);
+    const url = `${API_URLS.PRODUCTS}${identifier}/ratings/`;
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: buildHeaders(guestUser),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        return { data };
+      }
+      const message = await response.text();
+      return { data: null, error: new Error(message || `HTTP ${response.status}: ${response.statusText}`) };
+    } catch (error) {
+      console.warn('[api] Product ratings fetch failed:', error);
+      return { data: null, error: error as Error };
+    }
+  },
+
+  submitRating: async (slugOrId: string | number, payload: ProductRatingPayload, guestUser?: string) => {
+    const identifier = String(slugOrId);
+    const url = `${API_URLS.PRODUCTS}${identifier}/ratings/`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: buildHeaders(guestUser),
+        body: JSON.stringify(payload),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        return { data };
+      }
+      const message = await response.text();
+      return { data: null, error: new Error(message || `HTTP ${response.status}: ${response.statusText}`) };
+    } catch (error) {
+      console.warn('[api] Product rating submission failed:', error);
+      return { data: null, error: error as Error };
+    }
+  },
+
   list: async (opts?: { category?: string }) => {
     try {
       console.log(`[api] Loading products from: ${API_URLS.PRODUCTS}`);
@@ -254,18 +485,18 @@ export const productApi = {
         console.log(`[api] Loaded ${rowCount} quick compare rows`);
 
         if (Array.isArray(rows) && rowCount > 0) {
-          return { data: rows };
+          return { data: normaliseQuickCompareRows(rows) };
         }
 
         console.warn('[api] Quick compare API returned an empty payload, using mock data');
-        return { data: buildMockQuickCompare() };
+        return { data: normaliseQuickCompareRows(buildMockQuickCompare()) };
       }
 
       console.warn(`[api] Quick compare API returned ${response.status}, using mock data`);
-      return { data: buildMockQuickCompare() };
+      return { data: normaliseQuickCompareRows(buildMockQuickCompare()) };
     } catch (error) {
       console.warn('[api] Quick compare API failed, using mock data:', error);
-      return { data: buildMockQuickCompare() };
+      return { data: normaliseQuickCompareRows(buildMockQuickCompare()) };
     }
   },
 };

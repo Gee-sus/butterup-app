@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import {useLocation} from '../contexts/LocationContext';
 import {tokens} from '../theme/tokens';
+import {normalizeStoreName} from '../utils/stores';
 
 const StoreDetectionScreen: React.FC = () => {
   const {nearbyStores} = useLocation();
@@ -36,8 +37,8 @@ const StoreDetectionScreen: React.FC = () => {
           <View style={styles.storesContainer}>
             {nearbyStores.map((store: any, index: number) => (
               <View key={store.id || index} style={styles.storeCard}>
-                <Text style={styles.storeName}>{store.name}</Text>
-                <Text style={styles.storeChain}>{store.chain}</Text>
+                <Text style={styles.storeName}>{normalizeStoreName(store.name)}</Text>
+                <Text style={styles.storeChain}>{normalizeStoreName(store.chain)}</Text>
               </View>
             ))}
           </View>

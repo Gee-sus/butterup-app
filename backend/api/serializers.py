@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Store, Product, Price, PriceAlert, ImageAsset, NutritionProfile, EconomicIndicator, EmailSubscription, ScrapingLog, ListItem, PriceContribution
+from .models import Store, Product, Price, PriceAlert, ImageAsset, NutritionProfile, EconomicIndicator, EmailSubscription, ScrapingLog, ListItem, PriceContribution, ProductScoreSnapshot, ProductUserRating
 import re
 from django.utils.text import slugify as dj_slug
 
@@ -136,6 +136,8 @@ class ProductListSerializer(serializers.ModelSerializer):
         )
 
     def get_slug(self, obj):
+        if getattr(obj, 'slug', None):
+            return obj.slug
         grams = self.get_grams(obj)
         brand_name = obj.brand_display_name
         base = " ".join([
@@ -178,8 +180,9 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'brand', 'brand_display_name', 'gtin', 'weight_grams', 'package_type',
-            'is_active', 'created_at', 'updated_at', 'image_assets', 
+            'id', 'slug', 'name', 'brand', 'brand_display_name', 'gtin', 'weight_grams',
+            'package_type', 'category', 'is_active', 'is_healthy_option', 'serving_size_g',
+            'created_at', 'updated_at', 'image_assets',
             'primary_image', 'latest_price', 'name_with_brand'
         ]
     def get_name_with_brand(self, obj):
@@ -432,3 +435,193 @@ class UserProfileSerializer(serializers.Serializer):
     email = serializers.EmailField()
     avatar_url = serializers.URLField()
     provider = serializers.CharField() 
+
+class ProductUserRatingSerializer(serializers.ModelSerializer):
+    """Serializer for individual user ratings"""
+
+    class Meta:
+        model = ProductUserRating
+        fields = [
+            'id', 'overall_score', 'cost_score', 'texture_score', 'recipe_score',
+            'comment', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'overall_score': {'required': False},
+        }
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        for field in ['overall_score', 'cost_score', 'texture_score', 'recipe_score']:
+            value = data.get(field)
+            if value is not None:
+                try:
+                    data[field] = round(float(value), 1)
+                except (TypeError, ValueError):
+                    data[field] = value
+        return data
+
+
+class ProductRatingSubmissionSerializer(serializers.Serializer):
+    """Validation for rating submissions"""
+    overall_score = serializers.FloatField(min_value=0, max_value=10, required=False)
+    cost_score = serializers.FloatField(min_value=0, max_value=10)
+    texture_score = serializers.FloatField(min_value=0, max_value=10)
+    recipe_score = serializers.FloatField(min_value=0, max_value=10)
+    comment = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, data):
+        overall = data.get('overall_score')
+        if overall is None:
+            scores = [data.get('cost_score'), data.get('texture_score'), data.get('recipe_score')]
+            scores = [s for s in scores if s is not None]
+            if scores:
+                data['overall_score'] = round(sum(scores) / len(scores), 1)
+        return data
+
+
+class ProductDetailSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+    system_scores = serializers.SerializerMethodField()
+    community_rating = serializers.SerializerMethodField()
+    blended_score = serializers.SerializerMethodField()
+    rating_breakdown = serializers.SerializerMethodField()
+    pairs_well_with = serializers.SerializerMethodField()
+    healthy_alternatives = serializers.SerializerMethodField()
+    nutrition = serializers.SerializerMethodField()
+    calories = serializers.SerializerMethodField()
+    calorie_burn = serializers.SerializerMethodField()
+    prices = serializers.SerializerMethodField()
+    user_rating = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            'id', 'slug', 'name', 'brand', 'brand_display_name', 'package_type', 'category',
+            'weight_grams', 'is_healthy_option', 'serving_size_g', 'image_url',
+            'system_scores', 'community_rating', 'blended_score', 'rating_breakdown',
+            'pairs_well_with', 'healthy_alternatives', 'nutrition', 'calories',
+            'calorie_burn', 'prices', 'user_rating'
+        ]
+
+    def get_image_url(self, obj):
+        request = self.context.get('request')
+        return pick_image_url(obj, request) if request else pick_image_url(obj, None)
+
+    def get_system_scores(self, obj):
+        snapshot = obj.get_system_scores() or {}
+        return {
+            'overall': snapshot.get('overall'),
+            'affordability': snapshot.get('affordability'),
+            'fat_quality': snapshot.get('fat_quality'),
+            'recipe_friendly': snapshot.get('recipe_friendly'),
+            'notes': snapshot.get('notes') or {},
+            'pairs_well_with': snapshot.get('pairs_well_with') or [],
+        }
+
+    def get_community_rating(self, obj):
+        return obj.get_user_rating_summary()
+
+    def get_blended_score(self, obj):
+        blended = obj.get_blended_score()
+        return round(float(blended), 1) if blended is not None else None
+
+    def get_rating_breakdown(self, obj):
+        system = self.get_system_scores(obj)
+        community = self.get_community_rating(obj)
+        return {
+            'system': {
+                'overall': system.get('overall'),
+                'affordability': system.get('affordability'),
+                'fat_quality': system.get('fat_quality'),
+                'recipe_friendly': system.get('recipe_friendly'),
+                'notes': system.get('notes') or {},
+            },
+            'community': community,
+            'blended_overall': self.get_blended_score(obj),
+        }
+
+    def get_pairs_well_with(self, obj):
+        return obj.get_pairs_well_with()
+
+    def get_healthy_alternatives(self, obj):
+        alternatives = []
+        for alt in obj.healthy_alternatives.all():
+            alternatives.append({
+                'id': alt.id,
+                'slug': alt.slug,
+                'name': alt.name,
+                'brand': alt.brand,
+                'blended_score': alt.get_blended_score(),
+            })
+        return alternatives
+
+    def get_nutrition(self, obj):
+        profile = obj.nutrition_profile
+        if not profile:
+            return None
+        per_100 = profile.get_nutrition_per_100g()
+        per_serving = profile.get_nutrition_per_serving()
+        system = obj.get_system_scores() or {}
+        notes = system.get('notes') or {}
+        return {
+            'per_100g': per_100,
+            'per_serving': per_serving,
+            'fat_water_note': notes.get('fat_water'),
+            'healthy_swap_note': notes.get('healthy_swap'),
+        }
+
+    def get_calories(self, obj):
+        profile = obj.nutrition_profile
+        per_100 = profile.get_nutrition_per_100g() if profile else {}
+        per_serving = obj.get_serving_calories()
+        return {
+            'per_serving': per_serving,
+            'per_100g': per_100.get('calories_kcal'),
+            'serving_size_g': obj.serving_size_g,
+        }
+
+    def get_calorie_burn(self, obj):
+        return obj.get_calorie_burn_equivalents()
+
+    def get_prices(self, obj):
+        latest_by_store = {}
+        for price in obj.prices.select_related('store').order_by('-recorded_at'):
+            store_id = price.store_id
+            if store_id in latest_by_store:
+                continue
+            latest_by_store[store_id] = {
+                'store_id': price.store_id,
+                'store': price.store.name,
+                'chain': price.store.chain,
+                'price': float(price.price),
+                'price_per_kg': float(price.price_per_kg) if price.price_per_kg is not None else None,
+                'is_on_special': price.is_on_special,
+                'special_price': float(price.special_price) if price.special_price else None,
+                'recorded_at': price.recorded_at.isoformat() if price.recorded_at else None,
+            }
+        return list(latest_by_store.values())
+
+    def get_user_rating(self, obj):
+        context_user = self.context.get('current_user')
+        if context_user:
+            rating = obj.user_ratings.filter(user=context_user).first()
+            return ProductUserRatingSerializer(rating).data if rating else None
+        request = self.context.get('request')
+        if not request:
+            return None
+        user = request.user if request.user and request.user.is_authenticated else None
+        if not user:
+            headers = getattr(request, 'headers', {}) if hasattr(request, 'headers') else {}
+            username = headers.get('X-ButterUp-User') or headers.get('x-butterup-user')
+            if username:
+                from django.contrib.auth import get_user_model
+                UserModel = get_user_model()
+                try:
+                    user = UserModel.objects.get(username=username)
+                except UserModel.DoesNotExist:
+                    user = None
+        if not user:
+            return None
+        rating = obj.user_ratings.filter(user=user).first()
+        return ProductUserRatingSerializer(rating).data if rating else None

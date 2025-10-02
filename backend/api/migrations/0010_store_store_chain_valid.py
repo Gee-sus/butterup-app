@@ -12,6 +12,6 @@ class Migration(migrations.Migration):
     operations = [
         migrations.AddConstraint(
             model_name='store',
-            constraint=models.CheckConstraint(condition=models.Q(('chain__in', ['paknsave', 'countdown', 'new_world'])), name='store_chain_valid'),
+            constraint=models.CheckConstraint(check=models.Q(('chain__in', ['paknsave', 'countdown', 'new_world'])), name='store_chain_valid'),
         ),
     ]

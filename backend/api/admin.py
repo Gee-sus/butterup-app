@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Store, Product, Price, PriceAlert, ImageAsset, NutritionProfile, Brand
+from .models import Store, Product, Price, PriceAlert, ImageAsset, NutritionProfile, Brand, ProductScoreSnapshot, ProductUserRating
 
 @admin.register(Store)
 class StoreAdmin(admin.ModelAdmin):
@@ -17,8 +17,17 @@ class BrandAdmin(admin.ModelAdmin):
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
-    # Show brand first in the Name column, e.g. "Anchor Pure Butter"
-    fields = ("name", "brand", "weight_grams", "package_type", "image", "is_active")
+    fields = (
+        'name', 'brand', 'slug', 'weight_grams', 'package_type', 'category', 'image',
+        'is_active', 'is_healthy_option', 'serving_size_g', 'versatility_tags',
+        'nutrition_profile', 'healthy_alternatives'
+    )
+    list_display = ('name', 'brand', 'category', 'is_healthy_option', 'is_active')
+    list_filter = ('category', 'is_healthy_option', 'is_active')
+    search_fields = ('name', 'brand', 'slug')
+    prepopulated_fields = {'slug': ('brand', 'name')}
+    autocomplete_fields = ('nutrition_profile', 'healthy_alternatives')
+    filter_horizontal = ('healthy_alternatives',)
     
 @admin.register(Price)
 class PriceAdmin(admin.ModelAdmin):
@@ -48,3 +57,17 @@ class NutritionProfileAdmin(admin.ModelAdmin):
     def is_stale_display(self, obj):
         return "Yes" if obj.is_stale() else "No"
     is_stale_display.short_description = "Data Stale"
+
+@admin.register(ProductScoreSnapshot)
+class ProductScoreSnapshotAdmin(admin.ModelAdmin):
+    list_display = ('product', 'overall_score', 'affordability_score', 'fat_quality_score', 'recipe_friendly_score', 'updated_at')
+    search_fields = ('product__name', 'product__brand')
+    autocomplete_fields = ('product',)
+
+
+@admin.register(ProductUserRating)
+class ProductUserRatingAdmin(admin.ModelAdmin):
+    list_display = ('product', 'user', 'overall_score', 'cost_score', 'texture_score', 'recipe_score', 'updated_at')
+    search_fields = ('product__name', 'product__brand', 'user__username')
+    list_filter = ('updated_at',)
+    autocomplete_fields = ('product', 'user')

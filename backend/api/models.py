@@ -2,10 +2,12 @@ from django.db import models
 from django.db.models import Q, CheckConstraint
 from django.contrib.auth.models import User
 from django.core.validators import MinValueValidator, MaxValueValidator
+from decimal import Decimal
 import hashlib
 from PIL import Image
 import os
 import json
+from django.utils.text import slugify
 
 
 class Store(models.Model):
@@ -63,15 +65,33 @@ class Brand(models.Model):
 
 
 class Product(models.Model):
-    """Butter product model"""
+    """Butter product model enriched for detail experiences."""
+    CATEGORY_CHOICES = [
+        ('block', 'Block'),
+        ('spreadable', 'Spreadable'),
+        ('tub', 'Tub'),
+    ]
+
     name = models.CharField(max_length=200)
     brand = models.CharField(max_length=100)
-    gtin = models.CharField(max_length=14, unique=True, blank=True, null=True, 
+    slug = models.SlugField(max_length=150, unique=True, blank=True)
+    gtin = models.CharField(max_length=14, unique=True, blank=True, null=True,
                           help_text="Global Trade Item Number (8, 12, 13, or 14 digits)")
     weight_grams = models.IntegerField(help_text="Weight in grams")
     package_type = models.CharField(max_length=50, blank=True)  # Block, spreadable, etc.
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='block',
+                                help_text="Presentation format used in the app")
     image = models.ImageField(upload_to="products/", blank=True, null=True)  # Direct image field
     is_active = models.BooleanField(default=True)
+    is_healthy_option = models.BooleanField(default=False)
+    serving_size_g = models.PositiveIntegerField(default=10,
+        help_text="Default serving size (grams) for calorie equivalence")
+    versatility_tags = models.JSONField(default=list, blank=True,
+        help_text="Recipe or usage tags surfaced to the user")
+    nutrition_profile = models.OneToOneField('NutritionProfile', on_delete=models.SET_NULL,
+        related_name='product', null=True, blank=True)
+    healthy_alternatives = models.ManyToManyField('self', symmetrical=False, blank=True,
+        related_name='healthy_alternative_for', help_text="Suggested healthier swaps")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -80,21 +100,34 @@ class Product(models.Model):
 
     def __str__(self):
         return f"{self.brand} {self.name} ({self.weight_grams}g)"
-    
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            base = slugify(" ".join(filter(None, [self.brand, self.name, f"{self.weight_grams}g" if self.weight_grams else None])))
+            if not base:
+                base = slugify(self.name or self.brand or 'product')
+            slug_candidate = base or 'product'
+            suffix = 1
+            while Product.objects.filter(slug=slug_candidate).exclude(pk=self.pk).exists():
+                suffix += 1
+                slug_candidate = f"{base}-{suffix}"
+            self.slug = slug_candidate
+        return super().save(*args, **kwargs)
+
     @property
     def brand_display_name(self):
         """Get the display name for the brand using the Brand database"""
         try:
             from api.utils.brand_extractor import BrandExtractor
             return BrandExtractor.extract_brand_from_name(self.brand)
-        except:
+        except Exception:
             return self.brand
 
     @property
     def primary_image(self):
-        """Get the primary image for this product, preferring STORE > GS1 > OFF > UPLOAD and only images with files"""
+        """Get the primary image, preferring STORE > GS1 > OFF > UPLOAD"""
         from django.db.models import Case, When, IntegerField
-        
+
         return (
             self.image_assets
             .filter(is_active=True, file__isnull=False)
@@ -108,6 +141,145 @@ class Product(models.Model):
             .order_by('priority', '-last_fetched_at')
             .first()
         )
+
+    def get_score_snapshot(self):
+        return getattr(self, 'score_snapshot', None)
+
+    def get_system_scores(self):
+        snapshot = self.get_score_snapshot()
+        return snapshot.as_dict() if snapshot else None
+
+    def get_user_rating_summary(self):
+        from django.db.models import Avg, Count
+
+        stats = self.user_ratings.aggregate(
+            avg_overall=Avg('overall_score'),
+            avg_cost=Avg('cost_score'),
+            avg_texture=Avg('texture_score'),
+            avg_recipe=Avg('recipe_score'),
+            count=Count('id'),
+        ) if hasattr(self, 'user_ratings') else {
+            'avg_overall': None,
+            'avg_cost': None,
+            'avg_texture': None,
+            'avg_recipe': None,
+            'count': 0,
+        }
+
+        def _to_float(val):
+            return round(float(val), 1) if val is not None else None
+
+        return {
+            'average_overall': _to_float(stats.get('avg_overall')),
+            'average_cost': _to_float(stats.get('avg_cost')),
+            'average_texture': _to_float(stats.get('avg_texture')),
+            'average_recipe': _to_float(stats.get('avg_recipe')),
+            'count': stats.get('count') or 0,
+        }
+
+    def get_blended_score(self, system_weight: float = 0.7):
+        system = self.get_system_scores()
+        community = self.get_user_rating_summary()
+        system_score = system.get('overall') if system else None
+        crowd_score = community.get('average_overall')
+        if system_score is not None and crowd_score is not None:
+            blended = (system_weight * float(system_score)) + ((1 - system_weight) * float(crowd_score))
+            return round(blended, 1)
+        return system_score if system_score is not None else crowd_score
+
+    def get_pairs_well_with(self):
+        snapshot = self.get_score_snapshot()
+        if snapshot and snapshot.pairs_well_with:
+            return snapshot.pairs_well_with
+        return self.versatility_tags or []
+
+    def get_serving_calories(self):
+        profile = self.nutrition_profile
+        if not profile:
+            return None
+        return profile.get_calories_per_serving(self.serving_size_g)
+
+    def get_calorie_burn_equivalents(self):
+        calories = self.get_serving_calories()
+        if calories is None:
+            return {}
+        mets = {
+            'brisk_walk': 4.3,
+            'jogging': 7.0,
+            'cycling': 6.0,
+            'yoga': 3.0,
+        }
+        weight_kg = 70
+        equivalents = {}
+        for label, met in mets.items():
+            minutes = max(1, round((calories * 200) / (met * weight_kg)))
+            equivalents[label] = int(minutes)
+        return equivalents
+
+
+class ProductScoreSnapshot(models.Model):
+    """System-curated scores and narratives for a product."""
+    product = models.OneToOneField(Product, on_delete=models.CASCADE, related_name='score_snapshot')
+    overall_score = models.DecimalField(max_digits=4, decimal_places=1, default=Decimal('0.0'))
+    affordability_score = models.DecimalField(max_digits=4, decimal_places=1, default=Decimal('0.0'))
+    fat_quality_score = models.DecimalField(max_digits=4, decimal_places=1, default=Decimal('0.0'))
+    recipe_friendly_score = models.DecimalField(max_digits=4, decimal_places=1, default=Decimal('0.0'))
+    affordability_note = models.TextField(blank=True)
+    fat_water_note = models.TextField(blank=True)
+    recipe_note = models.TextField(blank=True)
+    healthy_swap_note = models.TextField(blank=True)
+    pairs_well_with = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Product Score Snapshot"
+        verbose_name_plural = "Product Score Snapshots"
+
+    def as_dict(self):
+        return {
+            'overall': float(self.overall_score) if self.overall_score is not None else None,
+            'affordability': float(self.affordability_score) if self.affordability_score is not None else None,
+            'fat_quality': float(self.fat_quality_score) if self.fat_quality_score is not None else None,
+            'recipe_friendly': float(self.recipe_friendly_score) if self.recipe_friendly_score is not None else None,
+            'notes': {
+                'affordability': self.affordability_note,
+                'fat_water': self.fat_water_note,
+                'recipe': self.recipe_note,
+                'healthy_swap': self.healthy_swap_note,
+            },
+            'pairs_well_with': self.pairs_well_with or [],
+        }
+
+
+class ProductUserRating(models.Model):
+    """Crowd contributed product ratings with multiple criteria."""
+    SCORE_VALIDATORS = [MinValueValidator(0), MaxValueValidator(10)]
+
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='user_ratings')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='product_ratings')
+    overall_score = models.DecimalField(max_digits=4, decimal_places=1, validators=SCORE_VALIDATORS)
+    cost_score = models.DecimalField(max_digits=4, decimal_places=1, validators=SCORE_VALIDATORS)
+    texture_score = models.DecimalField(max_digits=4, decimal_places=1, validators=SCORE_VALIDATORS)
+    recipe_score = models.DecimalField(max_digits=4, decimal_places=1, validators=SCORE_VALIDATORS)
+    comment = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['product', 'user']
+        ordering = ['-updated_at']
+
+    def save(self, *args, **kwargs):
+        if self.overall_score is None:
+            scores = [self.cost_score, self.texture_score, self.recipe_score]
+            scores = [float(s) for s in scores if s is not None]
+            if scores:
+                self.overall_score = round(sum(scores) / len(scores), 1)
+            else:
+                self.overall_score = Decimal('0.0')
+        return super().save(*args, **kwargs)
+
 
 
 class ImageAsset(models.Model):
@@ -356,35 +528,54 @@ class NutritionProfile(models.Model):
     sugars_g = models.DecimalField(max_digits=6, decimal_places=2)
     protein_g = models.DecimalField(max_digits=6, decimal_places=2)
     sodium_mg = models.DecimalField(max_digits=8, decimal_places=2)
+    water_g = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal('0.0'))
+    calories_kcal = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True,
+        help_text="Optional calories per serving override")
     last_verified_at = models.DateTimeField()
     source = models.CharField(max_length=200)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     def __str__(self):
         return f"{self.slug} - {self.origin}"
-    
+
     def is_stale(self):
         """Check if nutrition data is older than 90 days"""
         from django.utils import timezone
         from datetime import timedelta
         return self.last_verified_at < (timezone.now() - timedelta(days=90))
-    
+
+    def _calories_per_serving(self):
+        if self.calories_kcal is not None:
+            return Decimal(self.calories_kcal)
+        try:
+            return Decimal(self.energy_kj) * Decimal('0.239006')
+        except Exception:
+            return None
+
     def get_nutrition_per_100g(self):
         """Calculate nutrition per 100g"""
-        factor = 100 / self.serving_g
+        if not self.serving_g:
+            return {}
+        factor = Decimal('100') / Decimal(self.serving_g)
+        calories = self._calories_per_serving()
+        def _round(val):
+            return round(float(Decimal(val) * factor), 1) if val is not None else None
         return {
-            'energy_kj': round(self.energy_kj * factor, 1),
-            'fat_g': round(self.fat_g * factor, 1),
-            'sat_fat_g': round(self.sat_fat_g * factor, 1),
-            'carbs_g': round(self.carbs_g * factor, 1),
-            'sugars_g': round(self.sugars_g * factor, 1),
-            'protein_g': round(self.protein_g * factor, 1),
-            'sodium_mg': round(self.sodium_mg * factor, 1),
+            'energy_kj': _round(self.energy_kj),
+            'fat_g': _round(self.fat_g),
+            'sat_fat_g': _round(self.sat_fat_g),
+            'carbs_g': _round(self.carbs_g),
+            'sugars_g': _round(self.sugars_g),
+            'protein_g': _round(self.protein_g),
+            'sodium_mg': _round(self.sodium_mg),
+            'water_g': _round(self.water_g),
+            'calories_kcal': round(float(calories * factor), 1) if calories is not None else None,
         }
-    
+
     def get_nutrition_per_serving(self):
         """Get nutrition per serving"""
+        calories = self._calories_per_serving()
         return {
             'energy_kj': self.energy_kj,
             'fat_g': self.fat_g,
@@ -393,4 +584,12 @@ class NutritionProfile(models.Model):
             'sugars_g': self.sugars_g,
             'protein_g': self.protein_g,
             'sodium_mg': self.sodium_mg,
-        } 
+            'water_g': self.water_g,
+            'calories_kcal': round(float(calories), 1) if calories is not None else None,
+        }
+
+    def get_calories_per_serving(self, serving_size_g: int):
+        calories_per_100 = self.get_nutrition_per_100g().get('calories_kcal')
+        if calories_per_100 is None:
+            return None
+        return round(float(calories_per_100) * (serving_size_g / 100.0), 1)

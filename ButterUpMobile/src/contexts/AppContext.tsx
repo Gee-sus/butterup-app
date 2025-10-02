@@ -1,6 +1,6 @@
 import React, {createContext, useContext, useState, useEffect, ReactNode} from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import {ListItem, CheapestItem} from '../types';
+import {CheapestItem} from '../types';
 import {userApi} from '../services/api';
 
 interface SnackbarState {
@@ -19,12 +19,27 @@ interface UserProfile {
   provider: string;
 }
 
+// Enhanced list item type with rich product data
+export interface ListItem {
+  id: string | number;
+  name: string;
+  brand?: string;
+  price: number;
+  image_url?: string;
+  store: string;
+  weight?: string;
+  savings?: number;
+  worst_price?: number;
+  added_at: string;
+}
+
 interface AppContextType {
   // Shopping list state
-  list: {id: string|number; name: string; price?: number}[];
-  addToList: (item: {id: string|number; name: string; price?: number}) => void;
+  list: ListItem[];
+  addToList: (item: Omit<ListItem, 'added_at'>) => void;
   removeFromList: (id: string|number) => void;
   total: () => number;
+  totalSavings: () => number;
   
   // User profile state
   userProfile: UserProfile | null;
@@ -46,7 +61,7 @@ interface AppProviderProps {
 }
 
 export const AppProvider: React.FC<AppProviderProps> = ({children}) => {
-  const [list, setList] = useState<{id: string|number; name: string; price?: number}[]>([]);
+  const [list, setList] = useState<ListItem[]>([]);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [snackbar, setSnackbar] = useState<SnackbarState>({
     visible: false,
@@ -54,16 +69,31 @@ export const AppProvider: React.FC<AppProviderProps> = ({children}) => {
   });
   const [isLoading, setIsLoading] = useState(false);
 
-  const addToList = (item: {id: string|number; name: string; price?: number}) => {
-    setList(prev => [...prev, item]);
+  const addToList = (item: Omit<ListItem, 'added_at'>) => {
+    const newItem: ListItem = {
+      ...item,
+      added_at: new Date().toISOString(),
+    };
+    setList(prev => [...prev, newItem]);
   };
 
   const removeFromList = (id: string|number) => {
-    setList(prev => prev.filter(item => item.id !== id));
+    console.log('[AppContext] Removing item with id:', id);
+    console.log('[AppContext] Current list before removal:', list.map(item => ({ id: item.id, name: item.name })));
+    
+    setList(prev => {
+      const newList = prev.filter(item => item.id !== id);
+      console.log('[AppContext] New list after removal:', newList.map(item => ({ id: item.id, name: item.name })));
+      return newList;
+    });
   };
 
   const total = () => {
-    return list.reduce((sum, item) => sum + (item.price || 0), 0);
+    return list.reduce((sum, item) => sum + item.price, 0);
+  };
+
+  const totalSavings = () => {
+    return list.reduce((sum, item) => sum + (item.savings || 0), 0);
   };
 
   const loadUserProfile = async () => {
@@ -95,6 +125,7 @@ export const AppProvider: React.FC<AppProviderProps> = ({children}) => {
     addToList,
     removeFromList,
     total,
+    totalSavings,
     userProfile,
     loadUserProfile,
     snackbar,

@@ -16,6 +16,7 @@ import ExploreScreen from '../src/screens/ExploreScreen';
 import ScanSubmitScreen from '../src/screens/ScanSubmitScreen';
 import ProfileMainScreen from '../src/screens/ProfileMainScreen';
 import SettingsScreen from '../src/screens/SettingsScreen';
+import CategoryScreen from '../src/screens/CategoryScreen';
 
 // Import ProfileDrawer
 import ProfileDrawer from './ProfileDrawer';
@@ -120,6 +121,11 @@ export default function RootNavigator() {
         name="Alerts" 
         component={AlertsScreen}
         options={{title: 'Alerts'}}
+      />
+      <Stack.Screen 
+        name="Category" 
+        component={CategoryScreen}
+        options={{title: 'Category', headerShown: false}}
       />
     </Stack.Navigator>
   );

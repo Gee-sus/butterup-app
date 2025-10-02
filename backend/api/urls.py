@@ -15,6 +15,8 @@ router.register(r'contributions', views.PriceContributionViewSet, basename='cont
 urlpatterns = [
     path('', include(router.urls)),
     path('products/', views.ProductListView.as_view(), name='products-list'),
+    path('products/<slug:slug>/detail/', views.ProductDetailAPIView.as_view(), name='product-detail'),
+    path('products/<slug:slug>/ratings/', views.ProductRatingSubmitAPIView.as_view(), name='product-rating'),
     path('upload-image/', views.ImageUploadView.as_view(), name='upload-image'),
     path('cheapest/', views.CheapestView.as_view(), name='cheapest'),
     path('quick-compare/', views.QuickCompareView.as_view(), name='quick-compare'),
