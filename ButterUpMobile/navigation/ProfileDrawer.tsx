@@ -16,7 +16,7 @@ export default function ProfileDrawer() {
         drawerIcon: ({focused, color, size}) => {
           let iconName: keyof typeof Ionicons.glyphMap;
 
-          if (route.name === 'ProfileMain') {
+          if (route.name === 'ProfileHome') {
             iconName = focused ? 'person' : 'person-outline';
           } else if (route.name === 'Settings') {
             iconName = focused ? 'settings' : 'settings-outline';
@@ -39,7 +39,7 @@ export default function ProfileDrawer() {
         drawerType: 'slide',
       })}>
       <Drawer.Screen 
-        name="ProfileMain" 
+        name="ProfileHome" 
         component={ProfileMainScreen}
         options={{
           title: 'Profile',

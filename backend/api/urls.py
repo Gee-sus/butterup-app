@@ -1,6 +1,19 @@
 from django.urls import path, include
-from rest_framework.routers import DefaultRouter
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+)
 from . import views
+from rest_framework.routers import DefaultRouter
+urlpatterns = [
+    path('auth/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('auth/register/', views.RegisterView.as_view(), name='auth_register'),
+    path('auth/google/', views.GoogleAuthView.as_view(), name='auth_google'),
+    path('auth/apple/', views.AppleAuthView.as_view(), name='auth_apple'),
+]
+
+# Keep existing router/urls if any
 
 router = DefaultRouter()
 router.register(r'stores', views.StoreViewSet)

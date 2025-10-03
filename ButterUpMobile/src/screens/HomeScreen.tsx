@@ -121,6 +121,7 @@ export default function HomeScreen() {
   const [quickCompareRows, setQuickCompareRows] = useState<any[]>([]);
   const [isQuickCompareLoading, setIsQuickCompareLoading] = useState(true);
 
+  
   // Tooltip state
 
   const [tooltipVisible, setTooltipVisible] = useState(false);
@@ -198,7 +199,9 @@ export default function HomeScreen() {
 
   const handleAddToList = (product: any) => {
     const isAlreadyInList = list.some(item => item.id === product.id);
-    
+    if (isAlreadyInList) {
+      return;
+    }
     addToList({
       id: product.id,
       name: product.name_with_brand,
@@ -210,10 +213,7 @@ export default function HomeScreen() {
       savings: product.savings,
       worst_price: product.worst_price,
     });
-    
-    if (!isAlreadyInList) {
-      showSnackbar(`${product.name_with_brand} added to your list!`);
-    }
+    showSnackbar(`${product.name_with_brand} added to your list!`);
   };
 
   const loadQuickCompare = async () => {
@@ -460,7 +460,7 @@ export default function HomeScreen() {
           <Ionicons 
             name={isInList ? "checkmark" : "add"} 
             size={16} 
-            color="#ffffff" 
+            color={isInList ? '#ffffff' : tokens.colors.pill} 
           />
         </TouchableOpacity>
       </TouchableOpacity>
@@ -675,12 +675,12 @@ export default function HomeScreen() {
           activeOpacity={0.85}
         >
           <Ionicons
-            name="refresh"
+            name="arrow-forward"
             size={16}
-            color="#ffffff"
+            color={tokens.colors.bg}
             style={styles.heatmapRefreshIcon}
           />
-          <Text style={styles.heatmapRefreshText}>Refresh</Text>
+          <Text style={styles.heatmapRefreshText}>See more</Text>
         </TouchableOpacity>
       </View>
     );
@@ -696,13 +696,13 @@ export default function HomeScreen() {
               onPress={handleQuickCompareRefresh}
               activeOpacity={0.85}
             >
-              <Ionicons
-                name="refresh"
-                size={16}
-                color="#ffffff"
-                style={styles.heatmapRefreshIcon}
-              />
-              <Text style={styles.heatmapRefreshText}>Refresh</Text>
+          <Ionicons
+            name="arrow-forward"
+            size={16}
+            color={tokens.colors.bg}
+            style={styles.heatmapRefreshIcon}
+          />
+          <Text style={styles.heatmapRefreshText}>See more</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -752,7 +752,7 @@ export default function HomeScreen() {
               </View>
 
               {heatmapData.map((item, index) => (
-                <View key={index} style={styles.heatmapRow}>
+                <View key={`row-${(item.brandName || 'unknown').toString()}-${index}`} style={styles.heatmapRow}>
                   <View style={styles.heatmapProductCell}>
                     <View style={styles.brandImageContainer}>
                       {item.brandImage ? (
@@ -783,7 +783,7 @@ export default function HomeScreen() {
 
                   {availableStores.map((store, storeIndex) => (
                     <View
-                      key={`${item.brandName}--${store}--${storeIndex}`}
+                      key={`cell-${(item.brandName || 'unknown').toString()}-${store}-${storeIndex}`}
                       style={[
                         styles.heatmapCellContainer,
                         storeIndex === availableStores.length - 1 &&
@@ -936,8 +936,8 @@ export default function HomeScreen() {
           style={styles.horizontalScroll}
           contentContainerStyle={styles.horizontalContent}
         >
-          {topProducts.map((product) => (
-            <View key={product.id}>{renderHorizontalProductItem(product)}</View>
+          {topProducts.map((product, idx) => (
+            <View key={`top-${product.id}-${idx}`}>{renderHorizontalProductItem(product)}</View>
           ))}
         </ScrollView>
 
@@ -1179,7 +1179,6 @@ const styles = StyleSheet.create({
 
   addButton: {
     flex: 1,
-
     backgroundColor: tokens.colors.success,
 
     paddingVertical: tokens.spacing.sm,
@@ -1204,7 +1203,7 @@ const styles = StyleSheet.create({
   },
 
   addButtonAdded: {
-    backgroundColor: "#059669", // Darker green for "added" state
+    backgroundColor: "#059669",
   },
 
   addButtonText: {
@@ -1217,35 +1216,17 @@ const styles = StyleSheet.create({
 
   detailsButton: {
     flex: 1,
-
-    backgroundColor: tokens.colors.accent,
-
+    backgroundColor: tokens.colors.card,
     paddingVertical: tokens.spacing.sm,
-
     borderRadius: tokens.radius.lg,
-
     alignItems: "center",
-
-    shadowColor: tokens.colors.accent,
-
-    shadowOffset: {
-      width: 0,
-
-      height: 2,
-    },
-
-    shadowOpacity: 0.3,
-
-    shadowRadius: 4,
-
-    elevation: 4,
+    borderWidth: 2,
+    borderColor: tokens.colors.pill,
   },
 
   detailsButtonText: {
-    color: "#ffffff",
-
+    color: tokens.colors.pill,
     fontSize: tokens.text.tiny,
-
     fontWeight: "700",
   },
 
@@ -1302,21 +1283,19 @@ const styles = StyleSheet.create({
   },
 
   sectionToggle: {
-    paddingHorizontal: tokens.spacing.md,
-
-    paddingVertical: tokens.spacing.xs,
-
-    borderRadius: tokens.radius.lg,
-
-    backgroundColor: tokens.colors.accent,
+    paddingHorizontal: tokens.spacing.lg,
+    paddingVertical: tokens.spacing.sm,
+    borderRadius: tokens.radius.xl,
+    backgroundColor: tokens.colors.pill,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: tokens.spacing.xs,
   },
 
   sectionToggleText: {
-    color: tokens.colors.bg,
-
-    fontSize: tokens.text.tiny,
-
-    fontWeight: "700",
+    color: '#ffffff',
+    fontSize: tokens.text.body,
+    fontWeight: '700',
   },
 
   horizontalScroll: {
@@ -1410,7 +1389,9 @@ const styles = StyleSheet.create({
 
     right: tokens.spacing.sm,
 
-    backgroundColor: tokens.colors.success,
+    backgroundColor: tokens.colors.card,
+    borderWidth: 1,
+    borderColor: tokens.colors.pill,
 
     width: 28,
 
@@ -1424,7 +1405,8 @@ const styles = StyleSheet.create({
   },
 
   horizontalAddToCartButtonAdded: {
-    backgroundColor: "#10B981", // Keep the same green but could be different if needed
+    backgroundColor: tokens.colors.pill,
+    opacity: 0.85,
   },
 
   horizontalAddToCartText: {
@@ -1532,7 +1514,7 @@ const styles = StyleSheet.create({
 
     right: tokens.spacing.sm,
 
-    backgroundColor: tokens.colors.success,
+    backgroundColor: tokens.colors.pill,
 
     width: 32,
 
@@ -1652,10 +1634,10 @@ const styles = StyleSheet.create({
   heatmapRefreshButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: tokens.spacing.xs,
-    borderRadius: tokens.radius.lg,
-    backgroundColor: tokens.colors.accent,
+    paddingHorizontal: tokens.spacing.lg,
+    paddingVertical: tokens.spacing.sm,
+    borderRadius: tokens.radius.xl,
+    backgroundColor: tokens.colors.pill,
   },
 
   heatmapRefreshIcon: {
@@ -1663,8 +1645,8 @@ const styles = StyleSheet.create({
   },
 
   heatmapRefreshText: {
-    color: tokens.colors.bg,
-    fontSize: tokens.text.tiny,
+    color: '#ffffff',
+    fontSize: tokens.text.body,
     fontWeight: '700',
   },
 

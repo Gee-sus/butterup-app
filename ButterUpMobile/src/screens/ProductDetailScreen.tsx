@@ -1,4 +1,4 @@
-﻿import React, {useEffect, useMemo, useState} from 'react';
+﻿import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -6,8 +6,12 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   View,
+  PanResponder,
 } from 'react-native';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import {RouteProp, useNavigation, useRoute} from '@react-navigation/native';
 
 import {productApi} from '../services/api';
@@ -105,6 +109,42 @@ const formatPrice = (value?: number | null) => {
   return `$${Number(value).toFixed(2)}`;
 };
 
+const formatTimeAgo = (iso?: string | null) => {
+  if (!iso) return '—';
+  const updated = new Date(iso);
+  if (Number.isNaN(updated.getTime())) return '—';
+  const now = new Date();
+  const diffMs = now.getTime() - updated.getTime();
+  const diffMin = Math.floor(diffMs / (1000 * 60));
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffH = Math.floor(diffMin / 60);
+  if (diffH < 24) return `${diffH}h ago`;
+  const diffD = Math.floor(diffH / 24);
+  return `${diffD}d ago`;
+};
+
+const getScoreColor = (score?: number | null) => {
+  const s = Number(score ?? 0);
+  if (Number.isNaN(s)) return tokens.colors.ink2;
+  if (s >= 8.5) return tokens.colors.success;
+  if (s >= 7.0) return tokens.colors.pill;
+  return tokens.colors.error;
+};
+
+const renderStars = (score?: number | null) => {
+  const s = Math.max(0, Math.min(10, Number(score ?? 0)));
+  const fiveStar = s / 2; // map 0-10 to 0-5
+  const full = Math.floor(fiveStar);
+  const half = fiveStar - full >= 0.5 ? 1 : 0;
+  const empty = 5 - full - half;
+  const nodes: any[] = [];
+  for (let i = 0; i < full; i++) nodes.push(<Ionicons key={`fs-${i}`} name="star" size={14} color={tokens.colors.pill} />);
+  if (half) nodes.push(<Ionicons key="fs-half" name="star-half" size={14} color={tokens.colors.pill} />);
+  for (let i = 0; i < empty; i++) nodes.push(<Ionicons key={`fs-e-${i}`} name="star-outline" size={14} color={tokens.colors.pill} />);
+  return <View style={styles.starRow}>{nodes}</View>;
+};
+
 const formatWeight = (grams?: number | null) => {
   if (!grams) {
     return null;
@@ -120,12 +160,18 @@ const ProductDetailScreen: React.FC = () => {
   const navigation = useNavigation<any>();
   const {addToList, showSnackbar} = useApp();
   const {nearbyStores, locationLabel, nearbyStoreChains} = useLocation();
+  const insets = useSafeAreaInsets();
 
   const initialProduct: Record<string, any> = route.params?.product ?? {};
 
   const [detail, setDetail] = useState<ProductDetail | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [servingsPerWeek, setServingsPerWeek] = useState<number>(7);
+  const [rateVisible, setRateVisible] = useState<boolean>(false);
+  const [nutriVisible, setNutriVisible] = useState<boolean>(false);
+  const [tempRating, setTempRating] = useState<number>(8);
+  const [starBarWidth, setStarBarWidth] = useState<number>(0);
 
   useEffect(() => {
     let alive = true;
@@ -317,6 +363,68 @@ const ProductDetailScreen: React.FC = () => {
   const healthyAlternatives = detail?.healthy_alternatives ?? [];
   const recipeIdeas = detail?.pairs_well_with ?? [];
 
+  // Curious facts (includes nutrition insights); auto-rotate every 2 minutes
+  const curiousFacts = useMemo(() => {
+    const facts: string[] = [];
+    if (nutritionNotes?.fat_water_note) facts.push(nutritionNotes.fat_water_note);
+    if (nutritionNotes?.healthy_swap_note) facts.push(nutritionNotes.healthy_swap_note);
+    facts.push(
+      'In France, high-fat cultured butter is prized for pastries like croissants—fat helps create flaky layers.',
+    );
+    facts.push(
+      'Butter color can vary with a cow’s diet—beta-carotene in grass gives a natural golden hue.',
+    );
+    facts.push(
+      'Clarified butter (ghee) removes milk solids, raising smoke point and changing flavor and shelf life.',
+    );
+    return facts;
+  }, [nutritionNotes?.fat_water_note, nutritionNotes?.healthy_swap_note]);
+
+  const [factIndex, setFactIndex] = useState(0);
+  useEffect(() => {
+    if (!curiousFacts.length) return;
+    const id = setInterval(() => {
+      setFactIndex((i) => (i + 1) % curiousFacts.length);
+    }, 120000); // rotate every 2 minutes
+    return () => clearInterval(id);
+  }, [curiousFacts.length]);
+
+  // Swipe to change curious facts
+  const factsPan = React.useMemo(() =>
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 8,
+      onPanResponderRelease: (_, g) => {
+        if (!curiousFacts.length) return;
+        if (g.dx <= -24) {
+          // next
+          setFactIndex((i) => (i + 1) % curiousFacts.length);
+        } else if (g.dx >= 24) {
+          // prev
+          setFactIndex((i) => (i - 1 + curiousFacts.length) % curiousFacts.length);
+        }
+      },
+    })
+  , [curiousFacts.length]);
+
+  // Simple community comments preview (could be sourced from API later)
+  const communityComments: {id: string; user: string; text: string}[] = [
+    { id: 'c1', user: 'Amelia', text: 'Perfect for croissants, flaky and rich.' },
+    { id: 'c2', user: 'Noah', text: 'Melts evenly on toast, nice clean taste.' },
+  ];
+
+  // Calorie/fat impact estimation helpers
+  const servingSizeG = calorieInfo?.serving_size_g ?? 10; // default 10g if unknown
+  const weeklyCalories = Math.round((calorieInfo?.per_serving ?? 72) * servingsPerWeek);
+  // Approximate butter at ~81% fat by weight
+  const fatPerServingG = Math.round(servingSizeG * 0.81);
+  const weeklyFatG = fatPerServingG * servingsPerWeek;
+  // Rough burn equivalents
+  const kcalPerHourBriskWalk = 300; // ~300 kcal/hour
+  const kcalPerHourJog = 600; // ~600 kcal/hour
+  const walkHours = (weeklyCalories / kcalPerHourBriskWalk);
+  const jogHours = (weeklyCalories / kcalPerHourJog);
+
   const overallScore = preferValue<number>(
     detail?.rating_breakdown?.blended_overall ?? undefined,
     detail?.blended_score ?? undefined,
@@ -408,25 +516,39 @@ const ProductDetailScreen: React.FC = () => {
     navigation.navigate('PriceHistory', {productId: detail.id});
   };
 
-  const renderPriceRow = (entry: PriceEntry) => (
-    <View key={`${entry.store_id || entry.store}`} style={styles.priceRow}>
-      <View style={styles.priceStore}>
-        <Text style={styles.priceStoreName}>{entry.store}</Text>
-        <Text style={styles.priceStoreChain}>{entry.chain}</Text>
+  const renderPriceRow = (entry: PriceEntry, isBest: boolean) => (
+    <View key={`${entry.store_id || entry.store}`} style={[styles.priceRow, isBest && styles.priceRowBest]}>
+      <View style={styles.priceLeft}>
+        <View style={[styles.storeAvatar, isBest && styles.storeAvatarBest]}>
+          <Text style={styles.storeAvatarText}>{(entry.chain || entry.store || '?').charAt(0).toUpperCase()}</Text>
+        </View>
+        <View style={styles.priceStore}>
+          <Text style={styles.priceStoreName} numberOfLines={1}>{entry.store}</Text>
+          <Text style={styles.priceStoreChain} numberOfLines={1}>
+            {entry.chain || '—'} • {formatTimeAgo(entry.recorded_at)}
+          </Text>
+        </View>
       </View>
       <View style={styles.priceValueGroup}>
+        <View style={styles.priceRightTop}>
+          {isBest ? <Text style={styles.bestBadge}>Best</Text> : null}
+          {entry.is_on_special && entry.special_price ? (
+            <Text style={styles.priceSpecialBadge}>Special</Text>
+          ) : null}
+        </View>
         <Text style={styles.priceValue}>
           {formatPrice(entry.is_on_special ? entry.special_price || entry.price : entry.price)}
         </Text>
-        {entry.is_on_special && entry.special_price ? (
-          <Text style={styles.priceSpecialBadge}>Special</Text>
-        ) : null}
       </View>
     </View>
   );
 
+  // Reserve enough space at the bottom so content never hides behind the sticky footer
+  const footerReserveSpace = insets.bottom + (tokens.spacing.md + tokens.spacing.lg) + 72;
+
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <View style={{flex: 1, backgroundColor: tokens.colors.bg}}>
+      <ScrollView contentContainerStyle={[styles.container, {paddingBottom: footerReserveSpace}]} scrollEnabled={!rateVisible && !nutriVisible}> 
       <View style={styles.hero}>
         <View style={styles.heroText}>
           {showBrandLine ? <Text style={styles.brand}>{productBrand}</Text> : null}
@@ -450,7 +572,12 @@ const ProductDetailScreen: React.FC = () => {
       </View>
 
       {heroImage ? (
-        <Image source={{uri: heroImage}} style={styles.heroImage} resizeMode="cover" />
+        <View style={styles.heroImageWrap}>
+          <Image source={{uri: heroImage}} style={styles.heroImage} resizeMode="cover" />
+          <TouchableOpacity style={styles.imageAddBtn} onPress={handleAddToList} activeOpacity={0.85}>
+            <Ionicons name="add" size={20} color="#ffffff" />
+          </TouchableOpacity>
+        </View>
       ) : null}
 
       {error ? (
@@ -471,7 +598,10 @@ const ProductDetailScreen: React.FC = () => {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Prices near {locationLabel}</Text>
         {visiblePrices.length ? (
-          <View style={styles.priceList}>{visiblePrices.map(renderPriceRow)}</View>
+          <View style={styles.priceList}>{[...visiblePrices]
+            .sort((a, b) => (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY))
+            .map((entry, idx) => renderPriceRow(entry, idx === 0))}
+          </View>
         ) : (
           <View style={styles.emptyState}>
             <Text style={styles.emptyTitle}>No local prices yet</Text>
@@ -496,6 +626,10 @@ const ProductDetailScreen: React.FC = () => {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Ratings</Text>
         <View style={styles.ratingsGroup}>
+          <View style={styles.overallRow}>
+            {renderStars(overallScore)}
+            <Text style={styles.overallValue}>{overallScore !== undefined && overallScore !== null ? Number(overallScore).toFixed(1) : '—'}</Text>
+          </View>
           <View style={styles.metricRow}>
             <Text style={styles.metricLabel}>Overall</Text>
             <View style={styles.meter}>
@@ -504,6 +638,7 @@ const ProductDetailScreen: React.FC = () => {
                   styles.meterFill,
                   {
                     width: `${Math.min(100, Math.max(0, (Number(overallScore ?? 0) / 10) * 100))}%`,
+                    backgroundColor: getScoreColor(overallScore),
                   },
                 ]}
               />
@@ -523,6 +658,7 @@ const ProductDetailScreen: React.FC = () => {
                   styles.meterFill,
                   {
                     width: `${Math.min(100, Math.max(0, (Number(detail?.rating_breakdown?.system?.affordability ?? 0) / 10) * 100))}%`,
+                    backgroundColor: getScoreColor(detail?.rating_breakdown?.system?.affordability),
                   },
                 ]}
               />
@@ -540,6 +676,7 @@ const ProductDetailScreen: React.FC = () => {
                   styles.meterFill,
                   {
                     width: `${Math.min(100, Math.max(0, (Number(detail?.rating_breakdown?.system?.fat_quality ?? 0) / 10) * 100))}%`,
+                    backgroundColor: getScoreColor(detail?.rating_breakdown?.system?.fat_quality),
                   },
                 ]}
               />
@@ -557,6 +694,7 @@ const ProductDetailScreen: React.FC = () => {
                   styles.meterFill,
                   {
                     width: `${Math.min(100, Math.max(0, (Number(detail?.rating_breakdown?.system?.recipe_friendly ?? 0) / 10) * 100))}%`,
+                    backgroundColor: getScoreColor(detail?.rating_breakdown?.system?.recipe_friendly),
                   },
                 ]}
               />
@@ -573,18 +711,21 @@ const ProductDetailScreen: React.FC = () => {
                 : 'No community ratings yet'}
             </Text>
           </View>
+          <TouchableOpacity style={styles.rateButton} activeOpacity={0.85} onPress={() => setRateVisible(true)}>
+            <Text style={styles.rateButtonText}>Rate this butter</Text>
+          </TouchableOpacity>
         </View>
       </View>
 
-      {/* Nutrition Information - Always show */}
+      {/* Curious facts */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Why fat and water matter</Text>
-        <Text style={styles.bodyCopy}>
-          {nutritionNotes?.fat_water_note || "Butter with higher fat content provides better flavor and texture for baking. The water content affects how it behaves in recipes."}
-        </Text>
-        <Text style={styles.bodyCopy}>
-          {nutritionNotes?.healthy_swap_note || "For a healthier option, consider grass-fed butter or ghee, which may have higher omega-3 content."}
-        </Text>
+        <Text style={styles.sectionTitle}>Curious facts</Text>
+        <View {...factsPan.panHandlers}>
+          <Text style={styles.bodyCopy}>
+            {curiousFacts.length ? curiousFacts[factIndex] : 'Butter is a simple emulsion of fat and water—its balance shapes flavor and texture.'}
+          </Text>
+        </View>
+        <Text style={styles.supportText}>{`Fact ${Math.min(curiousFacts.length, factIndex + 1)} of ${Math.max(1, curiousFacts.length)}`}</Text>
       </View>
 
       {/* Healthy Alternatives - Always show */}
@@ -604,9 +745,12 @@ const ProductDetailScreen: React.FC = () => {
       {/* Recipe Ideas - Always show */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Recipe-friendly</Text>
-        <Text style={styles.bodyCopy}>
-          {recipeIdeas.length ? recipeIdeas.join(', ') : "Perfect for baking, cooking, spreading, and toast"}
-        </Text>
+        <View style={styles.chipRow}>
+          {(recipeIdeas.length ? recipeIdeas : ["Baking", "Cooking", "Spreading", "Toast"]).map((r) => (
+            <View key={String(r)} style={styles.chip}><Text style={styles.chipText}>{r}</Text></View>
+          ))}
+        </View>
+        <Text style={styles.supportText}>Pro tip: chill butter for laminated doughs; soften for cakes.</Text>
       </View>
 
       {/* Calorie Information - Always show */}
@@ -622,26 +766,88 @@ const ProductDetailScreen: React.FC = () => {
             ? `${Math.round(calorieInfo.per_100g)} kcal per 100g • Serving size ${calorieInfo.serving_size_g ?? '—'}g`
             : "720 kcal per 100g • Serving size 100g"}
         </Text>
+        <View style={styles.caloriePlanner}>
+          <Text style={styles.metaLabel}>Servings per week</Text>
+          <View style={styles.stepper}>
+            <TouchableOpacity style={styles.stepperBtn} onPress={() => setServingsPerWeek(Math.max(0, servingsPerWeek - 1))}>
+              <Ionicons name="remove" size={16} color={tokens.colors.ink} />
+            </TouchableOpacity>
+            <Text style={styles.stepperValue}>{servingsPerWeek}</Text>
+            <TouchableOpacity style={styles.stepperBtn} onPress={() => setServingsPerWeek(Math.min(70, servingsPerWeek + 1))}>
+              <Ionicons name="add" size={16} color={tokens.colors.ink} />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.impactCard}>
+            <Text style={styles.bodyCopy}>Weekly: {weeklyCalories} kcal • ~{weeklyFatG}g fat</Text>
+            <Text style={styles.supportText}>{`Burn equivalents: walk ~${walkHours.toFixed(1)}h or jog ~${jogHours.toFixed(1)}h`}</Text>
+          </View>
+        </View>
       </View>
 
-      {/* Action Buttons - Always show */}
-      <View style={styles.actions}>
-        <TouchableOpacity
-          style={styles.primaryButton}
-          onPress={handleAddToList}
-          activeOpacity={0.9}
-        >
-          <Text style={styles.primaryButtonText}>Add to my list</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.secondaryButton}
-          onPress={handlePriceHistory}
-          activeOpacity={0.9}
-        >
-          <Text style={styles.secondaryButtonText}>View price history</Text>
-        </TouchableOpacity>
+      {/* Community highlights */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>What people are saying</Text>
+        <View style={{gap: tokens.spacing.sm}}>
+          {communityComments.map((c) => (
+            <View key={c.id} style={styles.commentRow}>
+              <View style={styles.commentAvatar}><Text style={styles.commentAvatarText}>{c.user.charAt(0)}</Text></View>
+              <View style={{flex: 1}}>
+                <Text style={styles.commentUser}>{c.user}</Text>
+                <Text style={styles.commentText}>{c.text}</Text>
+              </View>
+            </View>
+          ))}
+        </View>
       </View>
-    </ScrollView>
+
+      
+
+      </ScrollView>
+
+      {/* Sticky safe-area footer actions */}
+      <View style={[styles.footerBar, {paddingBottom: insets.bottom + tokens.spacing.sm}]}> 
+        <View style={styles.footerActions}>
+          <TouchableOpacity style={styles.secondaryButton} onPress={handlePriceHistory} activeOpacity={0.9}>
+            <Text style={styles.secondaryButtonText}>View price history</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.tertiaryButton} onPress={() => setNutriVisible(true)} activeOpacity={0.9}>
+            <Ionicons name="nutrition-outline" size={16} color={tokens.colors.pill} />
+            <Text style={styles.tertiaryButtonText}>Nutrients</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Rating Modal */}
+      {rateVisible && (
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.sectionTitle}>Rate this butter</Text>
+            <StarSwipePicker
+              value={tempRating}
+              onChange={setTempRating}
+            />
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.modalCancel} onPress={() => setRateVisible(false)}><Text style={styles.modalCancelText}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.modalConfirm} onPress={() => setRateVisible(false)}><Text style={styles.modalConfirmText}>Submit</Text></TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+
+      {/* Nutrition Info Modal */}
+      {nutriVisible && (
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.sectionTitle}>Nutrient info</Text>
+            <Text style={styles.bodyCopy}>Per 100g: {Math.round(calorieInfo?.per_100g ?? 720)} kcal</Text>
+            <Text style={styles.supportText}>Serving size: {servingSizeG}g • Est. fat per serving: ~{fatPerServingG}g</Text>
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.modalConfirm} onPress={() => setNutriVisible(false)}><Text style={styles.modalConfirmText}>Close</Text></TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      )}
+    </View>
   );
 };
 
@@ -724,6 +930,25 @@ const styles = StyleSheet.create({
     height: 220,
     borderRadius: tokens.radius.lg,
   },
+  heroImageWrap: {
+    position: 'relative',
+  },
+  imageAddBtn: {
+    position: 'absolute',
+    top: tokens.spacing.sm,
+    right: tokens.spacing.sm,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: tokens.colors.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 2},
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 4,
+  },
   section: {
     backgroundColor: tokens.colors.card,
     borderRadius: tokens.radius.lg,
@@ -748,31 +973,80 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     backgroundColor: tokens.colors.bg,
-    borderRadius: tokens.radius.md,
+    borderRadius: tokens.radius.lg,
     padding: tokens.spacing.md,
     gap: tokens.spacing.sm,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+  },
+  priceRowBest: {
+    backgroundColor: 'rgba(245, 158, 11, 0.08)',
+    borderColor: tokens.colors.pill,
+  },
+  priceLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: tokens.spacing.sm,
+    minWidth: 0,
+  },
+  storeAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: tokens.colors.card,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  storeAvatarBest: {
+    backgroundColor: tokens.colors.pill,
+    borderColor: tokens.colors.pill,
+  },
+  storeAvatarText: {
+    fontSize: tokens.text.tiny,
+    fontWeight: '700',
+    color: tokens.colors.ink,
   },
   priceStore: {
     flex: 1,
     gap: 4,
+    minWidth: 0,
   },
   priceStoreName: {
     fontSize: tokens.text.body,
     fontWeight: '600',
     color: tokens.colors.ink,
+    maxWidth: '100%',
   },
   priceStoreChain: {
     fontSize: tokens.text.tiny,
     color: tokens.colors.ink2,
+    maxWidth: '100%',
   },
   priceValueGroup: {
     alignItems: 'flex-end',
-    gap: 4,
+    gap: 6,
+  },
+  priceRightTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: tokens.spacing.xs,
   },
   priceValue: {
     fontSize: tokens.text.body,
     fontWeight: '700',
     color: tokens.colors.ink,
+  },
+  bestBadge: {
+    backgroundColor: tokens.colors.pill,
+    color: '#ffffff',
+    fontSize: tokens.text.tiny,
+    fontWeight: '700',
+    paddingHorizontal: tokens.spacing.xs,
+    paddingVertical: 2,
+    borderRadius: tokens.radius.sm,
   },
   priceSpecialBadge: {
     backgroundColor: tokens.colors.pill,
@@ -829,13 +1103,188 @@ const styles = StyleSheet.create({
     color: tokens.colors.ink,
     fontWeight: '600',
   },
+  caloriePlanner: {
+    marginTop: tokens.spacing.md,
+    gap: tokens.spacing.sm,
+  },
+  metaLabel: {
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink2,
+  },
+  stepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: tokens.spacing.sm,
+  },
+  stepperBtn: {
+    backgroundColor: tokens.colors.card,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+    borderRadius: tokens.radius.md,
+    paddingHorizontal: tokens.spacing.sm,
+    paddingVertical: 6,
+  },
+  stepperValue: {
+    minWidth: 28,
+    textAlign: 'center',
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink,
+    fontWeight: '700',
+  },
+  impactCard: {
+    backgroundColor: tokens.colors.bg,
+    borderRadius: tokens.radius.lg,
+    padding: tokens.spacing.md,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+    gap: 4,
+  },
+  commentRow: {
+    flexDirection: 'row',
+    gap: tokens.spacing.sm,
+    alignItems: 'flex-start',
+  },
+  commentAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: tokens.colors.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  commentAvatarText: {
+    fontSize: tokens.text.tiny,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+  },
+  commentUser: {
+    fontSize: tokens.text.tiny,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+  },
+  commentText: {
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink2,
+  },
   actions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: tokens.spacing.sm,
   },
+  footerBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: tokens.colors.bg,
+    borderTopWidth: 1,
+    borderTopColor: tokens.colors.line,
+    paddingHorizontal: tokens.spacing.pad,
+    paddingTop: tokens.spacing.sm,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: -4},
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 10,
+  },
+  footerActions: {
+    flexDirection: 'row',
+    gap: tokens.spacing.sm,
+    alignItems: 'stretch',
+  },
+  tertiaryButton: {
+    flexGrow: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: tokens.spacing.xs,
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.md,
+    borderRadius: tokens.radius.lg,
+    backgroundColor: tokens.colors.card,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+  },
+  tertiaryButtonText: {
+    fontSize: tokens.text.tiny,
+    fontWeight: '700',
+    color: tokens.colors.pill,
+  },
+  modalOverlay: {
+    position: 'absolute',
+    left: 0, right: 0, top: 0, bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: tokens.spacing.pad,
+  },
+  modalCard: {
+    backgroundColor: tokens.colors.card,
+    borderRadius: tokens.radius.xl,
+    padding: tokens.spacing.lg,
+    gap: tokens.spacing.md,
+    width: '100%',
+  },
+  starPicker: {
+    flexDirection: 'row',
+    gap: tokens.spacing.sm,
+    alignSelf: 'center',
+  },
+  starSwipeBar: {
+    alignSelf: 'stretch',
+    paddingVertical: tokens.spacing.sm,
+    paddingHorizontal: tokens.spacing.md,
+    backgroundColor: tokens.colors.card,
+    borderRadius: tokens.radius.lg,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: tokens.spacing.sm,
+    justifyContent: 'flex-end',
+  },
+  modalCancel: {
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.sm,
+    borderRadius: tokens.radius.lg,
+    backgroundColor: tokens.colors.card,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+  },
+  modalCancelText: {
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink,
+    fontWeight: '700',
+  },
+  modalConfirm: {
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.sm,
+    borderRadius: tokens.radius.lg,
+    backgroundColor: tokens.colors.pill,
+  },
+  modalConfirmText: {
+    fontSize: tokens.text.tiny,
+    color: '#ffffff',
+    fontWeight: '700',
+  },
   ratingsGroup: {
     gap: tokens.spacing.sm,
+  },
+  overallRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: tokens.spacing.xs,
+  },
+  starRow: {
+    flexDirection: 'row',
+    gap: 2,
+  },
+  overallValue: {
+    fontSize: tokens.text.body,
+    fontWeight: '700',
+    color: tokens.colors.ink,
   },
   metricRow: {
     flexDirection: 'row',
@@ -872,6 +1321,20 @@ const styles = StyleSheet.create({
     fontSize: tokens.text.tiny,
     color: tokens.colors.ink2,
   },
+  rateButton: {
+    alignSelf: 'flex-end',
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+    borderRadius: tokens.radius.lg,
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.sm,
+    backgroundColor: tokens.colors.card,
+  },
+  rateButtonText: {
+    fontSize: tokens.text.tiny,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+  },
   primaryButton: {
     flexGrow: 1,
     backgroundColor: tokens.colors.pill,
@@ -891,6 +1354,7 @@ const styles = StyleSheet.create({
     paddingVertical: tokens.spacing.md,
     borderRadius: tokens.radius.lg,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   secondaryButtonText: {
     fontSize: tokens.text.body,
@@ -926,3 +1390,69 @@ const styles = StyleSheet.create({
 });
 
 export default ProductDetailScreen;
+
+// Swipeable star picker with half-star precision (maps to 0-10 scale)
+const StarSwipePicker: React.FC<{value: number; onChange: (v: number) => void}> = ({value, onChange}) => {
+  const [width, setWidth] = useState<number>(0);
+  const widthRef = React.useRef(0);
+  useEffect(() => { widthRef.current = width; }, [width]);
+
+  const computeFromX = (x: number) => {
+    if (width <= 0) return 0;
+    const clamped = Math.max(0, Math.min(width, x));
+    const ratio = clamped / width; // 0..1 across 5 stars
+    const stars = ratio * 5; // 0..5
+    // snap to nearest 0.5 star
+    const snapped = Math.round(stars * 2) / 2;
+    return Math.max(0, Math.min(10, snapped * 2)); // return as 0..10
+  };
+
+  const pan = PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponderCapture: () => true,
+    onMoveShouldSetPanResponderCapture: () => true,
+    onPanResponderGrant: (evt) => {
+      const x = evt.nativeEvent.locationX;
+      onChange(computeFromX(x));
+    },
+    onPanResponderMove: (evt) => {
+      const x = evt.nativeEvent.locationX;
+      onChange(computeFromX(x));
+    },
+    onPanResponderRelease: (evt) => {
+      const x = evt.nativeEvent.locationX;
+      onChange(computeFromX(x));
+    },
+    onShouldBlockNativeResponder: () => true,
+    onPanResponderTerminationRequest: () => false,
+  });
+
+  const stars = value / 2;
+  const full = Math.floor(stars);
+  const half = stars - full >= 0.5 ? 1 : 0;
+  const empty = 5 - full - half;
+
+  return (
+    <View
+      style={styles.starSwipeBar}
+      onLayout={(e) => setWidth(e.nativeEvent.layout.width)}
+      {...pan.panHandlers}
+    >
+      <TouchableWithoutFeedback onPress={(e) => {
+        const x = (e.nativeEvent as any).locationX ?? 0;
+        onChange(computeFromX(x));
+      }}>
+        <View pointerEvents="none" style={styles.starRow}>
+          {[...Array(full)].map((_, i) => (
+            <Ionicons key={`s-f-${i}`} name="star" size={28} color={tokens.colors.pill} />
+          ))}
+          {half ? <Ionicons key="s-h" name="star-half" size={28} color={tokens.colors.pill} /> : null}
+          {[...Array(empty)].map((_, i) => (
+            <Ionicons key={`s-e-${i}`} name="star-outline" size={28} color={tokens.colors.pill} />
+          ))}
+        </View>
+      </TouchableWithoutFeedback>
+    </View>
+  );
+};

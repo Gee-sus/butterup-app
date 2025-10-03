@@ -7,6 +7,7 @@ import {
   Animated,
   Dimensions,
 } from 'react-native';
+import { tokens } from '../theme/tokens';
 
 interface SnackbarProps {
   visible: boolean;
@@ -28,16 +29,24 @@ export const Snackbar: React.FC<SnackbarProps> = ({
   onDismiss,
   duration = 4000,
 }) => {
-  const translateY = new Animated.Value(100);
+  const scale = new Animated.Value(0);
+  const opacity = new Animated.Value(0);
 
   useEffect(() => {
     if (visible) {
-      // Show snackbar
-      Animated.timing(translateY, {
-        toValue: 0,
-        duration: 300,
-        useNativeDriver: true,
-      }).start();
+      // Show snackbar with scale and fade animation
+      Animated.parallel([
+        Animated.timing(scale, {
+          toValue: 1,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+        Animated.timing(opacity, {
+          toValue: 1,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+      ]).start();
 
       // Auto hide after duration
       const timer = setTimeout(() => {
@@ -51,11 +60,18 @@ export const Snackbar: React.FC<SnackbarProps> = ({
   }, [visible]);
 
   const hideSnackbar = () => {
-    Animated.timing(translateY, {
-      toValue: 100,
-      duration: 300,
-      useNativeDriver: true,
-    }).start(() => {
+    Animated.parallel([
+      Animated.timing(scale, {
+        toValue: 0,
+        duration: 250,
+        useNativeDriver: true,
+      }),
+      Animated.timing(opacity, {
+        toValue: 0,
+        duration: 250,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
       onDismiss();
     });
   };
@@ -76,7 +92,8 @@ export const Snackbar: React.FC<SnackbarProps> = ({
       style={[
         styles.container,
         {
-          transform: [{translateY}],
+          transform: [{scale}],
+          opacity,
         },
       ]}>
       <View style={styles.content}>
@@ -99,14 +116,26 @@ export const Snackbar: React.FC<SnackbarProps> = ({
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: '#2C2C2C',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    paddingBottom: 34, // Account for safe area
+    top: '50%',
+    left: tokens.spacing.pad,
+    right: tokens.spacing.pad,
+    backgroundColor: tokens.colors.pill, // filled pill style
+    paddingHorizontal: tokens.spacing.lg,
+    paddingVertical: tokens.spacing.lg,
+    borderRadius: tokens.radius.lg,
+    shadowColor: tokens.colors.ink,
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8, // Android shadow
     zIndex: 1000,
+    maxWidth: width - (tokens.spacing.pad * 2),
+    alignSelf: 'center',
+    marginTop: -30, // Adjust to center vertically
+    borderWidth: 0,
   },
   content: {
     flexDirection: 'row',
@@ -116,19 +145,23 @@ const styles = StyleSheet.create({
   message: {
     flex: 1,
     color: '#FFFFFF',
-    fontSize: 14,
-    marginRight: 12,
+    fontSize: tokens.text.body,
+    fontWeight: '600',
+    marginRight: tokens.spacing.md,
+    lineHeight: 20,
   },
   actionButton: {
-    backgroundColor: '#FF6B35',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 4,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: tokens.spacing.lg,
+    paddingVertical: tokens.spacing.sm,
+    borderRadius: tokens.radius.md,
+    minWidth: 60,
+    alignItems: 'center',
   },
   actionText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '600',
+    color: tokens.colors.ink,
+    fontSize: tokens.text.tiny,
+    fontWeight: '700',
   },
 });
 

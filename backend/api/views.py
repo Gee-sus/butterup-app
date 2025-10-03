@@ -12,8 +12,15 @@ from datetime import timedelta
 from django.shortcuts import get_object_or_404
 from django.http import Http404
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import make_password
+from rest_framework_simplejwt.tokens import RefreshToken
+import requests
+from jose import jwt
+from jose.exceptions import JWTError
 import logging
 from typing import List, Dict
+import os
+import hashlib
 from collections import OrderedDict
 
 from .models import (
@@ -39,6 +46,160 @@ from .services.gs1_client import GS1Client
 from .tasks import fetch_product_image
 
 logger = logging.getLogger(__name__)
+
+
+def _gravatar_url(email: str) -> str:
+    """Return a gravatar/identicon URL for an email (works for empty emails too)."""
+    safe_email = (email or "").strip().lower()
+    digest = hashlib.md5(safe_email.encode("utf-8")).hexdigest()
+    # d=identicon gives a nice fallback if no gravatar exists
+    return f"https://www.gravatar.com/avatar/{digest}?d=identicon"
+class RegisterView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = (request.data.get('email') or '').strip().lower()
+        password = request.data.get('password') or ''
+        name = (request.data.get('name') or '').strip()
+        if not email or not password:
+            return Response({'detail': 'Email and password are required'}, status=400)
+        User = get_user_model()
+        if User.objects.filter(email=email).exists():
+            return Response({'detail': 'Email already registered'}, status=400)
+        user = User.objects.create(
+            username=email,
+            email=email,
+            first_name=name.split(' ')[0] if name else '',
+            last_name=' '.join(name.split(' ')[1:]) if name and len(name.split(' '))>1 else '',
+            password=make_password(password),
+        )
+        refresh = RefreshToken.for_user(user)
+        avatar_url = _gravatar_url(user.email)
+        return Response({
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'name': user.get_full_name() or user.username or user.email,
+                'avatar_url': avatar_url,
+                'provider': 'email',
+            },
+        })
+
+
+class GoogleAuthView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        id_token = request.data.get('id_token')
+        # Optional client-provided aud (not trusted). We'll validate against env.
+        _client_aud = request.data.get('aud')
+        if not id_token:
+            return Response({'detail': 'id_token required'}, status=400)
+        # Verify with Google tokeninfo (simpler) or JWKs (more robust)
+        try:
+            resp = requests.get('https://oauth2.googleapis.com/tokeninfo', params={'id_token': id_token}, timeout=5)
+            if resp.status_code != 200:
+                return Response({'detail': 'Invalid Google token'}, status=400)
+            data = resp.json()
+            # Server-side audience check using env (supports comma-separated list)
+            allowed = os.getenv('GOOGLE_CLIENT_IDS') or os.getenv('GOOGLE_CLIENT_ID', '')
+            allowed_list = [a.strip() for a in allowed.split(',') if a.strip()]
+            if allowed_list and data.get('aud') not in allowed_list:
+                logger.warning("Google audience mismatch: %s not in %s", data.get('aud'), allowed_list)
+                return Response({'detail': 'Audience mismatch'}, status=400)
+            email = (data.get('email') or '').lower()
+            sub = data.get('sub')
+            picture = data.get('picture')
+            given_name = data.get('given_name') or ''
+            family_name = data.get('family_name') or ''
+            if not email and not sub:
+                return Response({'detail': 'Token missing subject/email'}, status=400)
+            User = get_user_model()
+            user = User.objects.filter(email=email).first() if email else None
+            if not user:
+                username = email or f'google_{sub}'
+                user = User.objects.create(username=username, email=email)
+            # Update names if available (best-effort)
+            if (given_name or family_name) and (not user.first_name and not user.last_name):
+                try:
+                    user.first_name = given_name
+                    user.last_name = family_name
+                    user.save(update_fields=['first_name', 'last_name'])
+                except Exception:
+                    pass
+            refresh = RefreshToken.for_user(user)
+            avatar_url = picture or _gravatar_url(user.email)
+            name = (user.get_full_name() or data.get('name') or user.username or user.email)
+            return Response({
+                'access': str(refresh.access_token),
+                'refresh': str(refresh),
+                'user': {
+                    'id': user.id,
+                    'email': user.email,
+                    'name': name,
+                    'avatar_url': avatar_url,
+                    'provider': 'google',
+                }
+            })
+        except Exception as e:
+            logger.exception('Google verification failed')
+            return Response({'detail': 'Google verification failed'}, status=400)
+
+
+class AppleAuthView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        id_token = request.data.get('id_token')
+        aud = request.data.get('aud')  # client-provided; prefer env APPLE_AUDIENCE
+        env_aud = os.getenv('APPLE_AUDIENCE')
+        if not id_token:
+            return Response({'detail': 'id_token required'}, status=400)
+        try:
+            # Fetch Apple JWKs
+            jwks = requests.get('https://appleid.apple.com/auth/keys', timeout=5).json()
+            header = jwt.get_unverified_header(id_token)
+            key = next((k for k in jwks['keys'] if k['kid'] == header.get('kid')), None)
+            if not key:
+                return Response({'detail': 'Apple key not found'}, status=400)
+            audience = env_aud or aud
+            payload = jwt.decode(
+                id_token,
+                key,
+                algorithms=[header.get('alg')],
+                audience=audience,
+                issuer='https://appleid.apple.com'
+            )
+            sub = payload.get('sub')
+            email = (payload.get('email') or '').lower()
+            User = get_user_model()
+            user = None
+            if email:
+                user = User.objects.filter(email=email).first()
+            if not user:
+                username = email or f'apple_{sub}'
+                user = User.objects.create(username=username, email=email)
+            refresh = RefreshToken.for_user(user)
+            avatar_url = _gravatar_url(user.email)
+            name = user.get_full_name() or user.username or user.email or 'Apple User'
+            return Response({
+                'access': str(refresh.access_token),
+                'refresh': str(refresh),
+                'user': {
+                    'id': user.id,
+                    'email': user.email,
+                    'name': name,
+                    'avatar_url': avatar_url,
+                    'provider': 'apple',
+                }
+            })
+        except JWTError:
+            return Response({'detail': 'Invalid Apple token'}, status=400)
+        except Exception:
+            logger.exception('Apple verification failed')
+            return Response({'detail': 'Apple verification failed'}, status=400)
 
 
 def _product_detail_queryset():
@@ -732,20 +893,30 @@ class CheapestView(APIView):
 
 
 class UserProfileView(APIView):
-    """API endpoint for user profile data"""
-    permission_classes = [IsAuthenticatedOrReadOnly]
-    
+    """API endpoint for user profile data (real user when authenticated)."""
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
-        """Get user profile data with mock values for MVP"""
-        # For MVP, return mock user data
-        profile_data = {
-            'name': 'John Doe',
-            'email': 'john.doe@example.com',
-            'avatar_url': 'https://via.placeholder.com/150/007bff/ffffff?text=JD',
-            'provider': 'google'
-        }
-        
-        serializer = UserProfileSerializer(profile_data)
+        user = request.user
+        if not user or not user.is_authenticated:
+            return Response({'detail': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        email = getattr(user, 'email', '') or ''
+        name = user.get_full_name() or user.username or email or 'User'
+        avatar_url = _gravatar_url(email)
+
+        # Infer provider heuristically from username if created via social
+        username = getattr(user, 'username', '') or ''
+        provider = 'google' if username.startswith('google_') else (
+            'apple' if username.startswith('apple_') else 'email'
+        )
+
+        serializer = UserProfileSerializer({
+            'name': name,
+            'email': email,
+            'avatar_url': avatar_url,
+            'provider': provider,
+        })
         return Response(serializer.data)
 
 

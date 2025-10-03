@@ -20,6 +20,8 @@ import CategoryScreen from '../src/screens/CategoryScreen';
 
 // Import ProfileDrawer
 import ProfileDrawer from './ProfileDrawer';
+import OnboardingScreen from '../src/screens/OnboardingScreen';
+import AuthOptionsScreen from '../src/screens/AuthOptionsScreen';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator<TabParamList>();
@@ -91,7 +93,18 @@ export default function RootNavigator() {
         headerTitleStyle: {
           fontWeight: 'bold',
         },
-      }}>
+      }}
+      initialRouteName="Onboarding">
+      <Stack.Screen 
+        name="Onboarding" 
+        component={OnboardingScreen}
+        options={{headerShown: false}}
+      />
+      <Stack.Screen 
+        name="AuthOptions" 
+        component={AuthOptionsScreen}
+        options={{title: 'Sign in'}}
+      />
       <Stack.Screen 
         name="Tabs" 
         component={MainTabs}

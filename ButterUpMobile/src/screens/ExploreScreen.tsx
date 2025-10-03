@@ -214,7 +214,9 @@ export default function ExploreScreen() {
   const gridRows: GridRow[] = useMemo(() => {
     return rows.slice(0, 10).map((row, index) => {
       const brandName = getBrandDisplayName(row).trim() || 'Unknown Butter';
-      const key = String(row.id ?? `${brandName}-${index}`);
+      // Ensure key uniqueness by including index and a stable brand fallback
+      const baseKey = String(row.id ?? brandName);
+      const key = `${baseKey}-${index}`;
       const packageSize =
         row.package_size || row.weight || row.product_size || row.size || null;
 

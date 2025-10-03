@@ -2,6 +2,8 @@ import {Product} from './index';
 import type {NavigatorScreenParams} from '@react-navigation/native';
 
 export type RootStackParamList = {
+  Onboarding: undefined;
+  AuthOptions: undefined;
   Tabs: NavigatorScreenParams<TabParamList>;
   StoreDetection: undefined;
   StoreSelection: undefined;
@@ -20,7 +22,7 @@ export type TabParamList = {
 };
 
 export type ProfileDrawerParamList = {
-  ProfileMain: undefined;
+  ProfileHome: undefined;
   Settings: undefined;
 };
 
