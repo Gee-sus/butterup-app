@@ -1,14 +1,28 @@
-import { Platform } from "react-native";
+import { Platform, NativeModules } from "react-native";
 
-// API Base URL configuration
-// Android emulator uses 10.0.2.2 to access host machine's localhost
-// iOS simulator uses 127.0.0.1 (localhost)
-// For debugging, let's try localhost first
-const defaultHost = "http://192.168.1.3:8000";
+// API Base URL resolution order:
+// 1) Env override (EXPO_PUBLIC_API_BASE_URL)
+// 2) Metro host (dev on physical devices)
+// 3) Emulator localhost fallback
+
+const getMetroHost = (): string | null => {
+  const scriptURL: string | undefined = (NativeModules as any)?.SourceCode?.scriptURL;
+  if (!scriptURL) return null;
+  // Example: http://192.168.1.6:8081/index.bundle?platform=android&dev=true
+  const withoutProtocol = scriptURL.split('://')[1] || scriptURL;
+  const hostPort = withoutProtocol.split('/')[0]; // 192.168.1.6:8081
+  const host = hostPort.split(':')[0]; // 192.168.1.6
+  return host || null;
+};
+
+const metroHost = __DEV__ ? getMetroHost() : null;
+const emulatorFallback = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'http://127.0.0.1:8000';
+const defaultHost = metroHost ? `http://${metroHost}:8000` : emulatorFallback;
 
 export const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || defaultHost;
 
 // API endpoints
+
 export const API_ENDPOINTS = {
   PRODUCTS: "/api/products/",
   STORES: "/api/stores/",

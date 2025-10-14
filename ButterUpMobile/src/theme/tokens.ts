@@ -17,6 +17,7 @@ export const tokens = {
   text: {
     title: 20,
     h2: 16,
+    h3: 16,
     body: 14,
     tiny: 12,
   },
