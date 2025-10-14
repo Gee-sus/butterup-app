@@ -327,6 +327,9 @@ const ProductDetails = () => {
   const [nutritionData, setNutritionData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [servingG, setServingG] = useState(25);
+  const [ratingSummary, setRatingSummary] = useState(null);
+  const [reviews, setReviews] = useState([]);
   
   // Find the product group or parse from slug
   const group = findByKeyOrNull(key);
@@ -356,6 +359,42 @@ const ProductDetails = () => {
     
     fetchNutritionData();
   }, [key, sample]);
+
+  // Optionally fetch ratings summary and sample reviews (graceful fallback if endpoints are missing)
+  useEffect(() => {
+    let isMounted = true;
+    const fetchRatings = async () => {
+      if (!sample) {
+        return;
+      }
+      try {
+        const summaryRes = await fetch(`/api/products/${key}/ratings/summary`);
+        if (summaryRes.ok) {
+          const summary = await summaryRes.json();
+          if (isMounted) {
+            setRatingSummary(summary);
+          }
+        }
+      } catch (_) {
+        // ignore
+      }
+      try {
+        const reviewsRes = await fetch(`/api/products/${key}/reviews`);
+        if (reviewsRes.ok) {
+          const list = await reviewsRes.json();
+          if (Array.isArray(list) && isMounted) {
+            setReviews(list.slice(0, 3));
+          }
+        }
+      } catch (_) {
+        // ignore
+      }
+    };
+    fetchRatings();
+    return () => {
+      isMounted = false;
+    };
+  }, [key, sample]);
   
   if (!sample) {
     return (
@@ -373,12 +412,113 @@ const ProductDetails = () => {
   // Get image URL using the utility function
   const src = imageUrlFromProduct(sample);
   
-  // Find the lowest price item (only if items exist)
-  const lowestPriceItem = items.length > 0 ? items.reduce((lowest, item) => {
-    const currentPrice = parseFloat(item.price?.replace(/[^0-9.]/g, '') || item.price);
-    const lowestPrice = parseFloat(lowest.price?.replace(/[^0-9.]/g, '') || lowest.price);
-    return currentPrice < lowestPrice ? item : lowest;
-  }, items[0]) : null;
+  // Derived helpers for calories, exercise, weight and ratings blocks
+  const CaloriesText = ({ caloriesPer100, servingG }) => {
+    let text = '-';
+    if (typeof caloriesPer100 === 'number') {
+      const kcal = caloriesPer100 * (servingG / 100);
+      text = String(Math.round(kcal)) + ' kcal';
+    }
+    return <div className="text-lg font-semibold">{text}</div>;
+  };
+
+  const ExerciseList = ({ caloriesPer100, servingG }) => {
+    const weightKg = 70;
+    const METS = { briskWalk: 4.3, running: 9.8, rowing: 7.0, swimming: 6.0 };
+    let kcal = null;
+    if (typeof caloriesPer100 === 'number') {
+      kcal = caloriesPer100 * (servingG / 100);
+    }
+    const minutesFor = (k, met) => {
+      if (!k || !met) return 0;
+      const mins = Math.round((k * 200) / (met * weightKg));
+      return mins < 1 ? 1 : mins;
+    };
+    return (
+      <ul className="grid grid-cols-2 gap-3 text-sm">
+        <li>Brisk walk: {minutesFor(kcal, METS.briskWalk)} min</li>
+        <li>Running: {minutesFor(kcal, METS.running)} min</li>
+        <li>Rowing: {minutesFor(kcal, METS.rowing)} min</li>
+        <li>Swimming: {minutesFor(kcal, METS.swimming)} min</li>
+      </ul>
+    );
+  };
+
+  const WeightGain = ({ caloriesPer100, servingG }) => {
+    let text = '-';
+    if (typeof caloriesPer100 === 'number') {
+      const kcal = caloriesPer100 * (servingG / 100);
+      const grams = Math.round((kcal / 7700) * 1000);
+      const clamped = grams < 0 ? 0 : grams;
+      text = `~${clamped} g (rough estimate)`;
+    }
+    return <p className="text-sm text-gray-700">{text}</p>;
+  };
+
+  const RatingsBlock = ({ ratingSummary, reviews }) => {
+    const toStars = (score10) => {
+      const num = Number(score10);
+      if (Number.isNaN(num)) return 0;
+      return Math.round(num / 2);
+    };
+    const Star = ({ filled }) => {
+      let cls = 'text-gray-300';
+      if (filled) cls = 'text-yellow-500';
+      return (
+        <svg className={cls} width="16" height="16" viewBox="0 0 20 20" fill="currentColor"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.802 2.035a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.802-2.035a1 1 0 00-1.175 0l-2.802 2.035c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
+      );
+    };
+    const stars = [];
+    const starCount = toStars(ratingSummary && ratingSummary.average_overall);
+    for (let i = 0; i < 5; i += 1) {
+      const filled = i < starCount;
+      stars.push(<Star key={i} filled={filled} />);
+    }
+    const countText = ratingSummary && ratingSummary.count ? ratingSummary.count : 0;
+    return (
+      <div>
+        <div className="flex items-center gap-2 mb-2">
+          {stars}
+          <span className="text-sm text-gray-600">({countText})</span>
+        </div>
+        {reviews && reviews.length > 0 && (
+          <ul className="text-sm text-gray-700 list-disc pl-5">
+            {reviews.map((r, idx) => {
+              const txt = r && (r.text || r.comment || '');
+              return <li key={idx}>{txt}</li>;
+            })}
+          </ul>
+        )}
+      </div>
+    );
+  };
+  
+  // Minimal three-store pricing and cheapest highlight
+  const desiredStores = ['Woolworths', "Pak'nSave", 'New World'];
+  const threeStores = [];
+  for (let i = 0; i < desiredStores.length; i += 1) {
+    const label = desiredStores[i];
+    let found = null;
+    for (let j = 0; j < items.length; j += 1) {
+      const it = items[j];
+      if (it && it.store === label) {
+        found = it;
+        break;
+      }
+    }
+    if (found && typeof found.price_value === 'number') {
+      threeStores.push({ label, value: found.price_value });
+    }
+  }
+  let cheapest = null;
+  for (let i = 0; i < threeStores.length; i += 1) {
+    const s = threeStores[i];
+    if (cheapest === null) {
+      cheapest = s;
+    } else if (s.value < cheapest.value) {
+      cheapest = s;
+    }
+  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -424,31 +564,27 @@ const ProductDetails = () => {
 
         {/* Pricing and Details */}
         <div className="space-y-6">
-          {/* Pricing - only show if items exist */}
-          {items.length > 0 ? (
+          {threeStores.length > 0 && (
             <div className="border border-gray-200 rounded-lg p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Pricing</h2>
-              <div className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-600">Lowest price:</span>
-                  <span className="text-xl font-bold text-green-600">
-                    {lowestPriceItem.price} at {lowestPriceItem.store}
-                  </span>
-                </div>
-                <div className="border-t border-gray-100 pt-3">
-                  <h3 className="text-sm font-medium text-gray-900 mb-2">All stores:</h3>
-                  <div className="space-y-2">
-                    {items.map((item, index) => (
-                      <div key={index} className="flex justify-between text-sm">
-                        <span className="text-gray-600">{item.store}</span>
-                        <span className="font-medium">{item.price}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              <div className="space-y-2">
+                {threeStores.map((s) => {
+                  let rowClass = 'flex justify-between text-sm';
+                  if (cheapest && s.label === cheapest.label) {
+                    rowClass = rowClass + ' bg-green-50 font-semibold rounded px-2 py-1';
+                  }
+                  const priceText = '$' + s.value.toFixed(2);
+                  return (
+                    <div key={s.label} className={rowClass}>
+                      <span className="text-gray-700">{s.label}</span>
+                      <span>{priceText}</span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
-          ) : (
+          )}
+          {threeStores.length === 0 && (
             <div className="border border-gray-200 rounded-lg p-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Pricing</h2>
               <p className="text-gray-500 text-sm">Prices will appear once loaded</p>
@@ -482,15 +618,62 @@ const ProductDetails = () => {
 
           {nutritionData && (
             <div className="space-y-6">
+              {/* Serving size & Calories */}
+              <div className="border border-gray-200 rounded-lg p-6">
+                <h2 className="text-lg font-semibold text-gray-900 mb-4">Serving size & Calories</h2>
+                <div className="flex items-center gap-4">
+                  <div className="flex-1">
+                    <input
+                      type="range"
+                      min={5}
+                      max={50}
+                      step={5}
+                      value={servingG}
+                      onChange={(e) => setServingG(Number(e.target.value))}
+                      className="w-full"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={servingG}
+                      onChange={(e) => setServingG(Number(e.target.value))}
+                      className="w-20 border rounded px-2 py-1"
+                    />
+                    <span className="text-sm text-gray-600">g</span>
+                  </div>
+                  <div className="ml-auto text-right">
+                    <div className="text-sm text-gray-600">Calories for serving</div>
+                    <CaloriesText caloriesPer100={nutritionData.nutrition_per_100g && nutritionData.nutrition_per_100g.calories_kcal} servingG={servingG} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Exercise equivalents */}
+              <div className="border border-gray-200 rounded-lg p-6">
+                <h2 className="text-lg font-semibold text-gray-900 mb-4">Exercise equivalents</h2>
+                <ExerciseList caloriesPer100={nutritionData.nutrition_per_100g && nutritionData.nutrition_per_100g.calories_kcal} servingG={servingG} />
+              </div>
+
+              {/* Potential weight gain */}
+              <div className="border border-gray-200 rounded-lg p-6">
+                <h2 className="text-lg font-semibold text-gray-900 mb-2">Potential weight gain</h2>
+                <WeightGain caloriesPer100={nutritionData.nutrition_per_100g && nutritionData.nutrition_per_100g.calories_kcal} servingG={servingG} />
+                <p className="text-xs text-gray-500 mt-1">Assumes 7,700 kcal ≈ 1 kg body fat</p>
+              </div>
+
+              {/* Community Ratings */}
+              <div className="border border-gray-200 rounded-lg p-6">
+                <h2 className="text-lg font-semibold text-gray-900 mb-3">Community Ratings</h2>
+                <RatingsBlock ratingSummary={ratingSummary} reviews={reviews} />
+              </div>
               {/* Nutrition */}
               <div className="border border-gray-200 rounded-lg p-6">
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-lg font-semibold text-gray-900">Nutrition Information</h2>
-                  {nutritionData.is_stale && (
-                    <span className="px-2 py-1 bg-yellow-100 text-yellow-800 text-xs rounded-full">
-                      Needs update
-                    </span>
-                  )}
+                  {nutritionData.is_stale && <span className="px-2 py-1 bg-yellow-100 text-yellow-800 text-xs rounded-full">Needs update</span>}
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
@@ -552,6 +735,57 @@ const ProductDetails = () => {
                     <li key={index} className="text-gray-700">• {warning}</li>
                   ))}
                 </ul>
+              </div>
+
+              {/* What people say (factoids) */}
+              <div className="border border-gray-200 rounded-lg p-6">
+                <h2 className="text-lg font-semibold text-gray-900 mb-2">What people say</h2>
+                <ul className="list-disc pl-5 text-sm text-gray-700">
+                  <li>“Great lamination for croissants.”</li>
+                  <li>“Browns evenly for pan-seared steaks.”</li>
+                  <li>“Reliable for buttercream frosting.”</li>
+                </ul>
+              </div>
+
+              {/* Page layout ASCII wireframe */}
+              <div className="border border-gray-200 rounded-lg p-6">
+                <h2 className="text-lg font-semibold text-gray-900 mb-2">Page layout (ASCII)</h2>
+                <pre className="text-xs leading-4 overflow-auto">{`
+----------------------------------------------------------------------------------
+| ← Back to Dashboard                                                              |
+----------------------------------------------------------------------------------
+|                              [ Product Image (square) ]                          |
+|                                                                                  |
+| Product Title: {brand} {name} ({size_g}g)                                        |
+| Tags: [Brand] [Size_g] [Type]                                                    |
+----------------------------------------------------------------------------------
+| Pricing (three stores, cheapest highlighted)                                     |
+|  Woolworths          $10.90                                                      |
+|  Pak'nSave           $10.40   [LOWEST]                                           |
+|  New World           $11.10                                                      |
+----------------------------------------------------------------------------------
+| Community Ratings    ★★★★☆  (4.2/5)  (123 ratings)                               |
+|  "Smooth and creamy" • "Great for baking"                                        |
+----------------------------------------------------------------------------------
+| Serving size & Calories                                                           |
+|  Serving size: [ slider ] [ 25 ] g   |   Calories for serving: {kcal} kcal       |
+----------------------------------------------------------------------------------
+| Exercise equivalents                                                              |
+|  Brisk walk:  {min} min   Running: {min} min   Rowing: {min} min   Swimming: {min}|
+----------------------------------------------------------------------------------
+| Potential weight gain                                                             |
+|  ~{grams} g (rough estimate) • 7,700 kcal ≈ 1 kg body fat                         |
+----------------------------------------------------------------------------------
+| Nutrition Information   | Allergens | Origin | Claims | Storage | Warnings        |
+----------------------------------------------------------------------------------
+| What people say (factoids):                                                      |
+|  - “Great lamination for croissants.”                                            |
+|  - “Browns evenly for pan-seared steaks.”                                        |
+|  - “Reliable for buttercream frosting.”                                          |
+----------------------------------------------------------------------------------
+| Footer: Last updated • Source                                                    |
+----------------------------------------------------------------------------------
+                `}</pre>
               </div>
 
               {/* Footer */}

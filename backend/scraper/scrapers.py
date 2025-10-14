@@ -102,17 +102,31 @@ class BaseScraper:
         return None
     
     def extract_brand_safely(self, name: str) -> str:
-        """Safely extract brand from product name using database lookup"""
-        try:
-            from api.utils.brand_extractor import BrandExtractor
-            return BrandExtractor.extract_brand_from_name(name)
-        except Exception as e:
-            logger.warning(f"Error extracting brand from '{name}': {e}")
-            # Fallback to simple first word extraction
-            if not name or not name.strip():
-                return "Unknown"
-            words = name.strip().split()
-            return words[0] if words else "Unknown"
+        """Extract brand from product name without DB lookups.
+
+        Strategy:
+        - Try matching against a small known list of common butter brands.
+        - Fallback to first word of the name, otherwise 'Unknown'.
+        """
+        if not name or not name.strip():
+            return "Unknown"
+
+        known_brands = [
+            # Common NZ butter brands and variants
+            "Anchor", "Mainland", "Westgold", "Lurpak", "Dairyworks",
+            "Pam's", "Pams", "Woolworths", "Countdown", "New World",
+            "Lewis Road", "Lewis Road Creamery", "Organic Times",
+            "Petit Normand", "Market Kitchen",
+        ]
+
+        lowered = name.lower()
+        for brand in known_brands:
+            if brand.lower() in lowered:
+                return brand
+
+        # Fallback: first word is often the brand for store brands
+        words = name.strip().split()
+        return words[0] if words else "Unknown"
 
 
 class CountdownScraper(BaseScraper):
