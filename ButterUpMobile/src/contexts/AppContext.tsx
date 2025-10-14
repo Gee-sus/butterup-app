@@ -70,11 +70,18 @@ export const AppProvider: React.FC<AppProviderProps> = ({children}) => {
   const [isLoading, setIsLoading] = useState(false);
 
   const addToList = (item: Omit<ListItem, 'added_at'>) => {
-    const newItem: ListItem = {
-      ...item,
-      added_at: new Date().toISOString(),
-    };
-    setList(prev => [...prev, newItem]);
+    // Prevent duplicates by id; if same id exists, no-op
+    setList(prev => {
+      const exists = prev.some(existing => String(existing.id) === String(item.id));
+      if (exists) {
+        return prev;
+      }
+      const newItem: ListItem = {
+        ...item,
+        added_at: new Date().toISOString(),
+      };
+      return [...prev, newItem];
+    });
   };
 
   const removeFromList = (id: string|number) => {

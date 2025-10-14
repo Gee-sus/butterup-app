@@ -2,6 +2,7 @@
 import {
   ActivityIndicator,
   Image,
+  Animated,
   ScrollView,
   StyleSheet,
   Text,
@@ -15,12 +16,28 @@ import { Ionicons } from '@expo/vector-icons';
 import {RouteProp, useNavigation, useRoute} from '@react-navigation/native';
 
 import {productApi} from '../services/api';
-import {tokens} from '../theme/tokens';
+// Local design tokens (copied here for readability in this file)
+const tokens = {
+  radius: { sm: 4, md: 8, lg: 12, xl: 16 },
+  spacing: { xs: 4, sm: 8, md: 12, lg: 16, xl: 20, xxl: 24, pad: 16 },
+  text: { title: 20, h2: 16, body: 14, tiny: 12 },
+  colors: {
+    bg: '#f8fafc',
+    card: '#ffffff',
+    ink: '#1f2937',
+    ink2: '#6b7280',
+    line: '#e2e8f0',
+    pill: '#f59e0b',
+    accent: '#3b82f6',
+    success: '#059669',
+    error: '#dc2626',
+  },
+};
 import LocationIndicator from '../components/LocationIndicator';
 import {useLocation} from '../contexts/LocationContext';
 import {useApp} from '../contexts/AppContext';
 import type {RootStackParamList} from '../navigation/RootNavigator';
-import {normalizeStoreName} from '../utils/stores';
+// removed unused imports
 
 type ProductDetailRoute = RouteProp<RootStackParamList, 'ProductDetail'>;
 
@@ -95,12 +112,7 @@ const preferValue = <T,>(...values: (T | null | undefined | '')[]): T | undefine
   return undefined;
 };
 
-const normalizeChain = (value?: string | null) => {
-  if (!value) {
-    return null;
-  }
-  return value.toLowerCase().replace(/[^a-z]/g, '');
-};
+// removed unused normalizeChain helper
 
 const formatPrice = (value?: number | null) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
@@ -158,7 +170,7 @@ const formatWeight = (grams?: number | null) => {
 const ProductDetailScreen: React.FC = () => {
   const route = useRoute<ProductDetailRoute>();
   const navigation = useNavigation<any>();
-  const {addToList, showSnackbar} = useApp();
+  const {addToList, showSnackbar, list} = useApp();
   const {nearbyStores, locationLabel, nearbyStoreChains} = useLocation();
   const insets = useSafeAreaInsets();
 
@@ -171,7 +183,8 @@ const ProductDetailScreen: React.FC = () => {
   const [rateVisible, setRateVisible] = useState<boolean>(false);
   const [nutriVisible, setNutriVisible] = useState<boolean>(false);
   const [tempRating, setTempRating] = useState<number>(8);
-  const [starBarWidth, setStarBarWidth] = useState<number>(0);
+  const [servingG, setServingG] = useState<number>(25);
+  const addAnim = useRef(new Animated.Value(0)).current; // 0 = idle, 1 = added
 
   useEffect(() => {
     let alive = true;
@@ -188,6 +201,7 @@ const ProductDetailScreen: React.FC = () => {
       if (identifier) {
         const {data, error: apiError} = await productApi.detail(identifier);
         if (!alive) return;
+        
         
         if (!apiError && data) {
           setDetail(data as ProductDetail);
@@ -323,6 +337,59 @@ const ProductDetailScreen: React.FC = () => {
     return Array.isArray(raw) ? raw : [];
   }, [detail, initialProduct]);
 
+  // Is this product already in the user's list?
+  const isInList = useMemo(() => {
+    if (!detail || !detail.id) return false;
+    return list.some((item: any) => item.id === detail.id);
+  }, [list, detail?.id]);
+
+  // Minimal three-supermarket pricing (Woolworths, Pak'nSave, New World)
+  const simpleChainPrices = useMemo(() => {
+    const desired = ["Woolworths", "Pak'nSave", 'New World'];
+    const result: { label: string; value: number }[] = [];
+    for (let i = 0; i < desired.length; i += 1) {
+      const chain = desired[i];
+      let minPrice: number | null = null;
+      for (let j = 0; j < prices.length; j += 1) {
+        const p = prices[j];
+        const chainName = (p.chain || '').trim();
+        const storeName = (p.store || '').trim();
+        // Normalize common aliases
+        const normalized = chainName.toLowerCase();
+        let matches = false;
+        if (chain === "Pak'nSave") {
+          matches = normalized === "pak'nsave" || normalized === 'paknsave' || storeName.toLowerCase().includes("pak'nsave") || storeName.toLowerCase().includes('paknsave');
+        } else if (chain === 'Woolworths') {
+          matches = normalized === 'woolworths' || normalized === 'countdown' || storeName.toLowerCase().includes('woolworths') || storeName.toLowerCase().includes('countdown');
+        } else if (chain === 'New World') {
+          matches = normalized === 'new world' || normalized === 'new_world' || storeName.toLowerCase().includes('new world');
+        }
+        if (matches) {
+          const priceNum = typeof p.price === 'number' ? p.price : null;
+          if (priceNum !== null) {
+            if (minPrice === null || priceNum < minPrice) {
+              minPrice = priceNum;
+            }
+          }
+        }
+      }
+      if (minPrice !== null) {
+        result.push({ label: chain, value: minPrice });
+      }
+    }
+    return result;
+  }, [prices]);
+
+  let cheapestChain: { label: string; value: number } | null = null;
+  for (let i = 0; i < simpleChainPrices.length; i += 1) {
+    const s = simpleChainPrices[i];
+    if (cheapestChain === null) {
+      cheapestChain = s;
+    } else if (s.value < (cheapestChain as any).value) {
+      cheapestChain = s;
+    }
+  }
+
   const locationStoreIds = useMemo(() => {
     const set = new Set<string>();
     nearbyStores.forEach((store) => {
@@ -413,17 +480,21 @@ const ProductDetailScreen: React.FC = () => {
     { id: 'c2', user: 'Noah', text: 'Melts evenly on toast, nice clean taste.' },
   ];
 
-  // Calorie/fat impact estimation helpers
-  const servingSizeG = calorieInfo?.serving_size_g ?? 10; // default 10g if unknown
-  const weeklyCalories = Math.round((calorieInfo?.per_serving ?? 72) * servingsPerWeek);
-  // Approximate butter at ~81% fat by weight
-  const fatPerServingG = Math.round(servingSizeG * 0.81);
-  const weeklyFatG = fatPerServingG * servingsPerWeek;
-  // Rough burn equivalents
-  const kcalPerHourBriskWalk = 300; // ~300 kcal/hour
-  const kcalPerHourJog = 600; // ~600 kcal/hour
-  const walkHours = (weeklyCalories / kcalPerHourBriskWalk);
-  const jogHours = (weeklyCalories / kcalPerHourJog);
+  // Serving-size based calories and exercise equivalents
+  const per100 = calorieInfo?.per_100g ?? 720;
+  const caloriesForServing = Math.round(per100 * (servingG / 100));
+  const METS = { briskWalk: 4.3, running: 9.8, rowing: 7.0, swimming: 6.0 } as const;
+  const weightKg = 70;
+  const minutesFor = (kcal: number, met: number) => {
+    if (!kcal || !met) return 0;
+    const mins = Math.round((kcal * 200) / (met * weightKg));
+    return mins < 1 ? 1 : mins;
+  };
+  const walkMin = minutesFor(caloriesForServing, METS.briskWalk);
+  const runMin = minutesFor(caloriesForServing, METS.running);
+  const rowMin = minutesFor(caloriesForServing, METS.rowing);
+  const swimMin = minutesFor(caloriesForServing, METS.swimming);
+  const gramsGain = Math.max(0, Math.round((caloriesForServing / 7700) * 1000));
 
   const overallScore = preferValue<number>(
     detail?.rating_breakdown?.blended_overall ?? undefined,
@@ -431,35 +502,37 @@ const ProductDetailScreen: React.FC = () => {
     initialProduct?.overall_score,
   );
 
-  // Smart product name construction to avoid brand repetition
+  // Simple product name: always "Brand Name" using backend brand+name. Ignore unknown display names.
   const productName = useMemo(() => {
-    const brand = detail?.brand_display_name || detail?.brand || initialProduct?.brand;
-    const name = detail?.name || initialProduct?.name;
-    
-    // If name already contains the brand, just use the name
-    if (name && brand && name.toLowerCase().includes(brand.toLowerCase())) {
-      return name;
-    }
-    
-    // Otherwise, combine brand and name
-    if (brand && name) {
-      return `${brand} ${name}`;
-    }
-    
-    return preferValue<string>(
-      detail?.name,
-      initialProduct?.name_with_brand,
-      detail?.brand_display_name,
-      initialProduct?.brand_display_name,
-      initialProduct?.name,
-    ) || 'Butter';
-  }, [detail?.brand_display_name, detail?.brand, detail?.name, initialProduct?.brand, initialProduct?.name, initialProduct?.name_with_brand]);
+    // Prefer backend brand unless empty. Treat 'Unknown' (case-insensitive) as empty.
+    const rawBrand = preferValue<string>(
+      detail?.brand,
+      initialProduct?.brand,
+    ) || '';
 
-  const productBrand = preferValue<string>(
-    detail?.brand_display_name,
-    detail?.brand,
-    initialProduct?.brand,
-  );
+    const brand = rawBrand && rawBrand.trim().toLowerCase() !== 'unknown'
+      ? rawBrand
+      : '';
+
+    const name = preferValue<string>(
+      detail?.name,
+      initialProduct?.name,
+    ) || '';
+
+    let title = '';
+    if (brand && name) {
+      title = `${brand} ${name}`;
+    } else if (brand) {
+      title = brand;
+    } else if (name) {
+      title = name;
+    } else {
+      title = 'Butter';
+    }
+    return title;
+  }, [detail?.brand, detail?.name, initialProduct?.brand, initialProduct?.name]);
+
+  // productBrand no longer needed since title includes brand
 
   const productCategory = preferValue<string>(
     detail?.package_type,
@@ -478,22 +551,13 @@ const ProductDetailScreen: React.FC = () => {
     initialProduct?.image_url,
   );
 
-  // Avoid repeating brand and name: show brand only if not already in the title
-  const showBrandLine = useMemo(() => {
-    if (!productBrand) return false;
-    const title = String(productName || '').toLowerCase();
-    const brand = String(productBrand).toLowerCase();
-    return !title.includes(brand);
-  }, [productBrand, productName]);
+  // Brand is included in the title
 
   const handleAddToList = () => {
-    if (!detail?.id) {
-      return;
-    }
-    
+    if (!detail?.id) return;
+    if (isInList) return;
     const bestPrice = visiblePrices[0]?.price ?? prices[0]?.price ?? 0;
     const bestStore = visiblePrices[0]?.store || prices[0]?.store || 'Unknown Store';
-    
     addToList({
       id: detail.id,
       name: productName,
@@ -505,8 +569,12 @@ const ProductDetailScreen: React.FC = () => {
       savings: (detail as any).savings || undefined,
       worst_price: (detail as any).worst_price || undefined,
     });
-    
     showSnackbar(`${productName} added to your list!`);
+    // animate add button tint
+    Animated.sequence([
+      Animated.timing(addAnim, { toValue: 1, duration: 220, useNativeDriver: false }),
+      Animated.timing(addAnim, { toValue: 0, duration: 180, useNativeDriver: false }),
+    ]).start();
   };
 
   const handlePriceHistory = () => {
@@ -551,7 +619,6 @@ const ProductDetailScreen: React.FC = () => {
       <ScrollView contentContainerStyle={[styles.container, {paddingBottom: footerReserveSpace}]} scrollEnabled={!rateVisible && !nutriVisible}> 
       <View style={styles.hero}>
         <View style={styles.heroText}>
-          {showBrandLine ? <Text style={styles.brand}>{productBrand}</Text> : null}
           <Text style={styles.title}>{productName}</Text>
           <View style={styles.metaRow}>
             {productCategory ? <Text style={styles.metaPill}>{productCategory}</Text> : null}
@@ -574,9 +641,27 @@ const ProductDetailScreen: React.FC = () => {
       {heroImage ? (
         <View style={styles.heroImageWrap}>
           <Image source={{uri: heroImage}} style={styles.heroImage} resizeMode="cover" />
-          <TouchableOpacity style={styles.imageAddBtn} onPress={handleAddToList} activeOpacity={0.85}>
-            <Ionicons name="add" size={20} color="#ffffff" />
-          </TouchableOpacity>
+          <Animated.View
+            style={[
+              styles.imageAddBtn,
+              {
+                backgroundColor: addAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [tokens.colors.pill, '#f59e0b'], // pill to same yellow for flash
+                }) as any,
+                transform: [
+                  {
+                    scale: addAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.1] }) as any,
+                  },
+                ],
+              },
+              isInList && { backgroundColor: tokens.colors.pill },
+            ]}
+          >
+            <TouchableOpacity onPress={handleAddToList} activeOpacity={0.85}>
+              <Ionicons name={isInList ? 'checkmark' : 'add'} size={20} color={'#ffffff'} />
+            </TouchableOpacity>
+          </Animated.View>
         </View>
       ) : null}
 
@@ -594,32 +679,28 @@ const ProductDetailScreen: React.FC = () => {
         </View>
       ) : null}
 
-      {/* Always show components - don't hide them behind loading/error states */}
+      {/* Minimalist Pricing: three supermarkets only */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Prices near {locationLabel}</Text>
-        {visiblePrices.length ? (
-          <View style={styles.priceList}>{[...visiblePrices]
-            .sort((a, b) => (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY))
-            .map((entry, idx) => renderPriceRow(entry, idx === 0))}
+        <Text style={styles.sectionTitle}>Pricing</Text>
+        {simpleChainPrices.length ? (
+          <View style={styles.simplePriceList}>
+            {simpleChainPrices.map((s) => {
+              const isCheapest = !!(cheapestChain && s.label === cheapestChain.label);
+              const rowStyle = [styles.simplePriceRow];
+              if (isCheapest) rowStyle.push(styles.simplePriceRowCheapest);
+              return (
+                <View key={s.label} style={rowStyle}>
+                  <Text style={styles.simplePriceLabel}>{s.label}</Text>
+                  <Text style={styles.simplePriceValue}>{`$${s.value.toFixed(2)}`}</Text>
+                </View>
+              );
+            })}
           </View>
         ) : (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyTitle}>No local prices yet</Text>
-            <Text style={styles.emptyBody}>
-              {"We're still collecting prices from supermarkets around you."}
-            </Text>
+            <Text style={styles.emptyBody}>Prices will appear once loaded</Text>
           </View>
         )}
-        {prices.length > 0 && !visiblePrices.length ? (
-          <Text style={styles.fallbackHint}>
-            {"We'll only show supermarkets confirmed near you. Come back soon for local price coverage."}
-          </Text>
-        ) : null}
-        {visiblePrices.length ? (
-          <Text style={styles.fallbackHint}>
-            {`Showing prices from ${nearbyStoreChains.join(', ')} you follow.`}
-          </Text>
-        ) : null}
       </View>
 
       {/* Ratings - Always show */}
@@ -728,61 +809,52 @@ const ProductDetailScreen: React.FC = () => {
         <Text style={styles.supportText}>{`Fact ${Math.min(curiousFacts.length, factIndex + 1)} of ${Math.max(1, curiousFacts.length)}`}</Text>
       </View>
 
-      {/* Healthy Alternatives - Always show */}
+    
+
+      {/* Serving size & Calories */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Healthy options</Text>
-        <View style={styles.chipRow}>
-          {healthyAlternatives.map((alt) => (
-            <View key={alt.id} style={styles.chip}>
-              <Text style={styles.chipText}>
-                {preferValue<string>(alt.brand, alt.name) || alt.name}
-              </Text>
+        <Text style={styles.sectionTitle}>Serving size & Calories</Text>
+        <View style={styles.compactRow}>
+          <View style={styles.compactLeft}>
+            <Text style={styles.metaLabel}>Serving</Text>
+            <View style={styles.stepper}>
+              <TouchableOpacity style={styles.stepperBtn} onPress={() => setServingG(Math.max(5, servingG - 5))}>
+                <Ionicons name="remove" size={16} color={tokens.colors.ink} />
+              </TouchableOpacity>
+              <Text style={styles.stepperValue}>{servingG}g</Text>
+              <TouchableOpacity style={styles.stepperBtn} onPress={() => setServingG(Math.min(200, servingG + 5))}>
+                <Ionicons name="add" size={16} color={tokens.colors.ink} />
+              </TouchableOpacity>
             </View>
-          ))}
-        </View>
-      </View>
-
-      {/* Recipe Ideas - Always show */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Recipe-friendly</Text>
-        <View style={styles.chipRow}>
-          {(recipeIdeas.length ? recipeIdeas : ["Baking", "Cooking", "Spreading", "Toast"]).map((r) => (
-            <View key={String(r)} style={styles.chip}><Text style={styles.chipText}>{r}</Text></View>
-          ))}
-        </View>
-        <Text style={styles.supportText}>Pro tip: chill butter for laminated doughs; soften for cakes.</Text>
-      </View>
-
-      {/* Calorie Information - Always show */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Calories</Text>
-        <Text style={styles.bodyCopy}>
-          {calorieInfo?.per_serving
-            ? `${Math.round(calorieInfo.per_serving)} kcal per serving`
-            : '720 kcal per serving'}
-        </Text>
-        <Text style={styles.supportText}>
-          {calorieInfo?.per_100g 
-            ? `${Math.round(calorieInfo.per_100g)} kcal per 100g • Serving size ${calorieInfo.serving_size_g ?? '—'}g`
-            : "720 kcal per 100g • Serving size 100g"}
-        </Text>
-        <View style={styles.caloriePlanner}>
-          <Text style={styles.metaLabel}>Servings per week</Text>
-          <View style={styles.stepper}>
-            <TouchableOpacity style={styles.stepperBtn} onPress={() => setServingsPerWeek(Math.max(0, servingsPerWeek - 1))}>
-              <Ionicons name="remove" size={16} color={tokens.colors.ink} />
-            </TouchableOpacity>
-            <Text style={styles.stepperValue}>{servingsPerWeek}</Text>
-            <TouchableOpacity style={styles.stepperBtn} onPress={() => setServingsPerWeek(Math.min(70, servingsPerWeek + 1))}>
-              <Ionicons name="add" size={16} color={tokens.colors.ink} />
-            </TouchableOpacity>
           </View>
-          <View style={styles.impactCard}>
-            <Text style={styles.bodyCopy}>Weekly: {weeklyCalories} kcal • ~{weeklyFatG}g fat</Text>
-            <Text style={styles.supportText}>{`Burn equivalents: walk ~${walkHours.toFixed(1)}h or jog ~${jogHours.toFixed(1)}h`}</Text>
+          <View style={styles.compactRight}>
+            <Text style={styles.supportText}>Calories</Text>
+            <Text style={styles.calorieValue}>{caloriesForServing} kcal</Text>
           </View>
         </View>
       </View>
+
+      {/* Exercise equivalents */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Exercise equivalents</Text>
+        <View style={styles.inlinePairs}>
+          <Text style={styles.bodyCopy}>Brisk walk: {walkMin} min</Text>
+          <Text style={styles.bodyCopy}>Running: {runMin} min</Text>
+        </View>
+        <View style={styles.inlinePairs}>
+          <Text style={styles.bodyCopy}>Rowing: {rowMin} min</Text>
+          <Text style={styles.bodyCopy}>Swimming: {swimMin} min</Text>
+        </View>
+      </View>
+
+      {/* Potential weight gain */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Potential weight gain</Text>
+        <Text style={styles.bodyCopy}>{`~${gramsGain} g (rough estimate)`}</Text>
+        <Text style={styles.supportText}>Assumes 7,700 kcal ≈ 1 kg body fat</Text>
+      </View>
+
+      {/* Removed old weekly calories planner in favor of serving-size based info */}
 
       {/* Community highlights */}
       <View style={styles.section}>
@@ -839,8 +911,8 @@ const ProductDetailScreen: React.FC = () => {
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <Text style={styles.sectionTitle}>Nutrient info</Text>
-            <Text style={styles.bodyCopy}>Per 100g: {Math.round(calorieInfo?.per_100g ?? 720)} kcal</Text>
-            <Text style={styles.supportText}>Serving size: {servingSizeG}g • Est. fat per serving: ~{fatPerServingG}g</Text>
+            <Text style={styles.bodyCopy}>Per 100g: {Math.round(per100)} kcal</Text>
+            <Text style={styles.supportText}>Serving size: {servingG}g • Calories for serving: {caloriesForServing} kcal</Text>
             <View style={styles.modalActions}>
               <TouchableOpacity style={styles.modalConfirm} onPress={() => setNutriVisible(false)}><Text style={styles.modalConfirmText}>Close</Text></TouchableOpacity>
             </View>
@@ -940,7 +1012,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: tokens.colors.pill,
+    backgroundColor: tokens.colors.pill, // yellow, matches Popular Picks tint
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -1166,11 +1238,7 @@ const styles = StyleSheet.create({
     fontSize: tokens.text.tiny,
     color: tokens.colors.ink2,
   },
-  actions: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: tokens.spacing.sm,
-  },
+  // removed unused actions style
   footerBar: {
     position: 'absolute',
     left: 0,
@@ -1225,11 +1293,7 @@ const styles = StyleSheet.create({
     gap: tokens.spacing.md,
     width: '100%',
   },
-  starPicker: {
-    flexDirection: 'row',
-    gap: tokens.spacing.sm,
-    alignSelf: 'center',
-  },
+  // removed unused starPicker style
   starSwipeBar: {
     alignSelf: 'stretch',
     paddingVertical: tokens.spacing.sm,
@@ -1335,18 +1399,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: tokens.colors.ink,
   },
-  primaryButton: {
-    flexGrow: 1,
-    backgroundColor: tokens.colors.pill,
-    paddingVertical: tokens.spacing.md,
-    borderRadius: tokens.radius.lg,
-    alignItems: 'center',
-  },
-  primaryButtonText: {
-    fontSize: tokens.text.body,
-    fontWeight: '700',
-    color: '#ffffff',
-  },
+  // removed unused primary button styles
   secondaryButton: {
     flexGrow: 1,
     borderWidth: 2,
@@ -1360,6 +1413,69 @@ const styles = StyleSheet.create({
     fontSize: tokens.text.body,
     fontWeight: '700',
     color: tokens.colors.pill,
+  },
+  simplePriceList: {
+    gap: tokens.spacing.sm,
+  },
+  simplePriceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: tokens.colors.bg,
+    borderRadius: tokens.radius.lg,
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.sm,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+  },
+  simplePriceRowCheapest: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(16, 185, 129, 0.08)',
+    borderRadius: tokens.radius.lg,
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.sm,
+    borderWidth: 1,
+    borderColor: '#10b981',
+  },
+  simplePriceLabel: {
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink,
+    fontWeight: '600',
+  },
+  simplePriceValue: {
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink,
+    fontWeight: '700',
+  },
+  inlineRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: tokens.spacing.md,
+  },
+  compactRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: tokens.spacing.md,
+  },
+  compactLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: tokens.spacing.md,
+  },
+  compactRight: {
+    alignItems: 'flex-end',
+  },
+  inlinePairs: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  calorieValue: {
+    fontSize: tokens.text.body,
+    fontWeight: '700',
+    color: tokens.colors.ink,
   },
   errorCard: {
     backgroundColor: '#fef2f2',

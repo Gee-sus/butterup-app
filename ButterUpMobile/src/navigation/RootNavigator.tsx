@@ -18,9 +18,13 @@ import StoreDetectionScreen from "../screens/StoreDetectionScreen";
 import ProductDetailScreen from "../screens/ProductDetailScreen";
 import PriceHistoryScreen from "../screens/PriceHistoryScreen";
 import ProductListScreen from "../screens/ProductListScreen";
+import OnboardingScreen from "../screens/OnboardingScreen";
+import AuthOptionsScreen from "../screens/AuthOptionsScreen";
 
 // Navigation types
 export type RootStackParamList = {
+  Onboarding: undefined;
+  AuthOptions: undefined;
   Tabs: undefined;
   ProductDetail: { product: any };
   PriceHistory: { productId: number };
@@ -38,7 +42,7 @@ export type TabParamList = {
 };
 
 export type ProfileStackParamList = {
-  ProfileMain: undefined;
+  ProfileHome: undefined;
   Settings: undefined;
   Alerts: undefined;
   StoreSelection: undefined;
@@ -56,7 +60,7 @@ const ProfileStackNavigator = () => {
   return (
     <ProfileStack.Navigator>
       <ProfileStack.Screen
-        name="ProfileMain"
+        name="ProfileHome"
         component={ProfileScreen}
         options={{ headerShown: false }}
       />
@@ -158,7 +162,17 @@ const TabNavigator = () => {
 // Root Navigator
 const RootNavigator = () => {
   return (
-    <Stack.Navigator>
+    <Stack.Navigator initialRouteName="Onboarding">
+      <Stack.Screen
+        name="Onboarding"
+        component={OnboardingScreen}
+        options={{ headerShown: false }}
+      />
+      <Stack.Screen
+        name="AuthOptions"
+        component={AuthOptionsScreen}
+        options={{ title: "Sign in" }}
+      />
       <Stack.Screen
         name="Tabs"
         component={TabNavigator}
