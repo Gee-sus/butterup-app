@@ -1,4 +1,4 @@
-﻿import React, {useState} from 'react';
+﻿import React, {useEffect, useRef, useState} from 'react';
 import {
   View,
   Text,
@@ -9,76 +9,97 @@ import {
   ScrollView,
   SafeAreaView,
   ActivityIndicator,
-  Modal,
-  Picker,
   Platform,
+  Dimensions,
+  Animated,
+  PanResponder,
 } from 'react-native';
 import {Ionicons} from '@expo/vector-icons';
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import type { BarcodeScanningResult } from 'expo-camera';
+import * as Haptics from 'expo-haptics';
+import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import {useApp} from '../contexts/AppContext';
+import { Picker } from '@react-native-picker/picker';
 import LocationIndicator from '../components/LocationIndicator';
 import ProductResultCard from '../components/ProductResultCard';
 import StorePriceRow from '../components/StorePriceRow';
-import {scanApi} from '../services/api';
+import {scanApi, getPricesByGTIN} from '../services/api';
 import {tokens} from '../theme/tokens';
-
-type Mode = 'menu' | 'result' | 'submit';
-
+type Mode = 'menu' | 'result' | 'submit' | 'scanner';
 interface IdentifiedProduct {
   id: number;
   name_with_brand: string;
   rating: number;
   image_url?: string;
 }
-
 interface StorePrice {
   store: string;
   price: number;
   distance_km?: number;
 }
-
 const MAIN_STORES = ["Pak'nSave", "Woolworths", "New World"];
-
 export default function ScanSubmitScreen() {
   const {addToList, showSnackbar} = useApp();
   const insets = useSafeAreaInsets();
   const headerMargin = insets.top + tokens.spacing.md;
-
+  const [cameraPermission, requestBarcodeCameraPermission] = useCameraPermissions();
   const [mode, setMode] = useState<Mode>('menu');
   const [loading, setLoading] = useState(false);
   const [imageUri, setImageUri] = useState<string | null>(null);
-  
   // Result state
   const [identifiedProduct, setIdentifiedProduct] = useState<IdentifiedProduct | null>(null);
   const [storePrices, setStorePrices] = useState<StorePrice[]>([]);
-  
   // Submit state
   const [storeName, setStoreName] = useState('');
   const [price, setPrice] = useState('');
   const [note, setNote] = useState('');
   const [selectedStore, setSelectedStore] = useState('');
   const [productId, setProductId] = useState<number | undefined>(undefined);
-
-
+  const [gtin, setGtin] = useState('');
+  const [scanning, setScanning] = useState<boolean>(true);
+  const [priceRows, setPriceRows] = useState<Array<{store: string; price: number; distanceKm?: number}>>([]);
+  const [cheapest, setCheapest] = useState<{store?: string; price?: number}>({});
+  const [potentialSavings, setPotentialSavings] = useState<number | null>(null);
+  const [productSize, setProductSize] = useState<number | null>(null);
+  const lastScanTimeRef = useRef<number>(0);
+  const screenH = Dimensions.get('window').height;
+  const OPEN_Y = Math.round(screenH * 0.34);
+  const CLOSED_Y = Math.round(screenH - 120);
+  const sheetY = useRef(new Animated.Value(screenH)).current;
+  const sheetYRef = useRef<number>(screenH);
+  const panStartY = useRef(OPEN_Y);
+  useEffect(() => {
+    const listenerId = sheetY.addListener(({ value }) => {
+      sheetYRef.current = value;
+    });
+    return () => {
+      sheetY.removeListener(listenerId);
+    };
+  }, [sheetY]);
+  useEffect(() => {
+    if (mode !== 'scanner') {
+      sheetY.setValue(screenH);
+      sheetYRef.current = screenH;
+    }
+  }, [mode, screenH, sheetY]);
   const requestImagePermission = async () => {
     const {status} = await ImagePicker.requestMediaLibraryPermissionsAsync();
     return status === 'granted';
   };
-
   const requestCameraPermission = async () => {
     const {status} = await ImagePicker.requestCameraPermissionsAsync();
     return status === 'granted';
   };
-
   const getCurrentLocation = async () => {
     try {
       const {status} = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
         return null;
       }
-
       const location = await Location.getCurrentPositionAsync({});
       return {
         lat: location.coords.latitude,
@@ -89,14 +110,12 @@ export default function ScanSubmitScreen() {
       return null;
     }
   };
-
   const handleScanProduct = async () => {
     const cameraPermission = await requestCameraPermission();
     if (!cameraPermission) {
       Alert.alert('Permission Required', 'Camera permission is needed to scan products');
       return;
     }
-
     try {
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
@@ -104,7 +123,6 @@ export default function ScanSubmitScreen() {
         aspect: [4, 3],
         quality: 0.8,
       });
-
       if (!result.canceled && result.assets[0]) {
         setImageUri(result.assets[0].uri);
         await identifyProduct(result.assets[0].uri);
@@ -113,7 +131,6 @@ export default function ScanSubmitScreen() {
       Alert.alert('Error', 'Failed to capture photo');
     }
   };
-
   const handleSubmitPricePhoto = async () => {
     Alert.alert(
       'Select Photo Source',
@@ -136,42 +153,41 @@ export default function ScanSubmitScreen() {
     setLoading(true);
     try {
       const location = await getCurrentLocation();
-      const product = await scanApi.identifyByPhoto(uri, location || undefined);
-      
-      setIdentifiedProduct(product);
-      
-      // Fetch nearby prices
-      const prices = await scanApi.nearbyPrices(product.id, location || undefined);
-      setStorePrices(prices);
-      
+      const identified = await scanApi.identifyByPhoto(uri, location ?? undefined);
+      setIdentifiedProduct(identified);
+
+      const nearby = await scanApi.nearbyPrices(identified.id, location ?? undefined);
+      setStorePrices(Array.isArray(nearby) ? nearby : []);
       setMode('result');
     } catch (error) {
       Alert.alert(
         'Identification Failed',
-        'We couldn\'t identify this product. Please try again or submit it manually.',
+        "We couldn't identify this product. Please try again or submit it manually.",
         [
-          {text: 'Try Again', onPress: () => setLoading(false)},
-          {text: 'Submit Manually', onPress: () => {
-            setMode('submit');
-            setLoading(false);
-          }},
-        ]
+          {text: 'Try Again', style: 'default'},
+          {
+            text: 'Submit Manually',
+            onPress: () => setMode('submit'),
+          },
+        ],
       );
+    } finally {
+      setLoading(false);
     }
   };
 
   const pickImageForSubmit = async (source: 'camera' | 'library') => {
-    const permission = source === 'camera' 
-      ? await requestCameraPermission() 
+    const permission = source === 'camera'
+      ? await requestCameraPermission()
       : await requestImagePermission();
-    
+
     if (!permission) {
       Alert.alert('Permission Required', `${source === 'camera' ? 'Camera' : 'Photo library'} permission is needed`);
       return;
     }
 
     try {
-      const result = source === 'camera' 
+      const result = source === 'camera'
         ? await ImagePicker.launchCameraAsync({
             mediaTypes: ImagePicker.MediaTypeOptions.Images,
             allowsEditing: true,
@@ -185,12 +201,224 @@ export default function ScanSubmitScreen() {
             quality: 0.8,
           });
 
-      if (!result.canceled && result.assets[0]) {
-        setImageUri(result.assets[0].uri);
+      if (!result.canceled && result.assets?.[0]) {
+        let nextUri = result.assets[0].uri;
+        try {
+          const manipulated = await ImageManipulator.manipulateAsync(
+            nextUri,
+            [],
+            {compress: 0.7, format: ImageManipulator.SaveFormat.JPEG},
+          );
+          if (manipulated?.uri) {
+            nextUri = manipulated.uri;
+          }
+        } catch (err) {
+          console.warn('[ScanSubmitScreen] Image manipulation failed:', err);
+        }
+
+        setImageUri(nextUri);
         setMode('submit');
       }
     } catch (error) {
       Alert.alert('Error', 'Failed to pick image');
+    }
+  };
+
+  const animateSheetTo = (target: number) => {
+    Animated.spring(sheetY, {
+      toValue: target,
+      useNativeDriver: true,
+      bounciness: 0,
+      speed: 18,
+    }).start(() => {
+      const isOpen = target === OPEN_Y;
+      if (!isOpen) {
+        setScanning(true);
+      }
+    });
+  };
+  const openBottomSheet = () => {
+    animateSheetTo(OPEN_Y);
+  };
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dy) > 6,
+      onPanResponderGrant: () => {
+        panStartY.current = sheetYRef.current;
+      },
+      onPanResponderMove: (_, gestureState) => {
+        const next = Math.min(
+          Math.max(OPEN_Y, panStartY.current + gestureState.dy),
+          CLOSED_Y,
+        );
+        sheetY.setValue(next);
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        const current = sheetYRef.current;
+        const halfway = (OPEN_Y + CLOSED_Y) / 2;
+        const shouldClose = gestureState.vy > 0.6 || current > halfway;
+        animateSheetTo(shouldClose ? CLOSED_Y : OPEN_Y);
+      },
+    }),
+  ).current;
+  const openBarcodeScanner = async () => {
+    try {
+      if (!cameraPermission) {
+        // Permission is still loading
+        return;
+      }
+      
+      if (!cameraPermission.granted) {
+        const { granted } = await requestBarcodeCameraPermission();
+        if (!granted) {
+          Alert.alert('Camera', 'Enable camera to scan barcodes.');
+          return;
+        }
+      }
+      
+      setMode('scanner');
+      setGtin('');
+      setScanning(true);
+      setIdentifiedProduct(null);
+      setPriceRows([]);
+      setCheapest({});
+      setPotentialSavings(null);
+      setProductSize(null);
+      sheetY.setValue(CLOSED_Y);
+      sheetYRef.current = CLOSED_Y;
+      lastScanTimeRef.current = 0;
+    } catch (error) {
+      console.warn('[ScanSubmitScreen] Unable to open barcode scanner:', error);
+      Alert.alert('Error', 'Failed to open the barcode scanner. Please try again.');
+    }
+  };
+  const onBarCodeScanned = async (result: BarcodeScanningResult) => {
+    if (!scanning) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastScanTimeRef.current < 1000) {
+      return;
+    }
+    lastScanTimeRef.current = now;
+    setScanning(false);
+    const rawData = String(result?.data ?? '').trim();
+    if (!rawData) {
+      setScanning(true);
+      return;
+    }
+    
+    // Filter out URLs and QR codes that aren't product barcodes
+    if (rawData.includes('://') || rawData.includes('http') || rawData.includes('www.')) {
+      console.log('[ScanSubmitScreen] Ignoring URL/QR code:', rawData);
+      setScanning(true);
+      return;
+    }
+    
+    const normalizedCode = rawData.replace(/\s+/g, '');
+    if (!normalizedCode) {
+      setScanning(true);
+      return;
+    }
+    
+    // Only accept numeric barcodes of valid lengths (8, 12, 13, or 14 digits)
+    const digitsOnly = normalizedCode.replace(/\D/g, '');
+    if (!digitsOnly || ![8, 12, 13, 14].includes(digitsOnly.length)) {
+      console.log('[ScanSubmitScreen] Invalid barcode length:', digitsOnly, 'length:', digitsOnly.length);
+      setScanning(true);
+      return;
+    }
+    try {
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err) {
+      console.warn('[ScanSubmitScreen] Haptics unavailable:', err);
+    }
+    setGtin(digitsOnly);
+    const loc = await getCurrentLocation();
+    if (!loc?.lat || !loc?.lng) {
+      Alert.alert('Location', 'Turn on location to find nearby stores.');
+      setScanning(true);
+      return;
+    }
+    try {
+      setLoading(true);
+      const data = await getPricesByGTIN({ gtin: digitsOnly, lat: loc.lat, lng: loc.lng, radius_m: 5000 });
+      const nameWithBrand = `${data.product.brand ?? ''} ${data.product.name ?? ''}`.trim() || 'Product';
+      setIdentifiedProduct({
+        id: data.product.id,
+        name_with_brand: nameWithBrand,
+        rating: 0,
+        image_url: undefined,
+      });
+      setProductSize(data.product.size_grams ?? null);
+      const toPriceNumber = (value: unknown): number => {
+        if (value == null) {
+          return NaN;
+        }
+        if (typeof value === 'number') {
+          return value;
+        }
+        const parsed = parseFloat(String(value).replace(/[^0-9.]/g, ''));
+        return Number.isFinite(parsed) ? parsed : NaN;
+      };
+      const rows: Array<{store: string; price: number; distanceKm?: number}> = [];
+      (data.nearby_options || []).forEach((option) => {
+        const priceNumber = toPriceNumber(option?.price);
+        if (!Number.isFinite(priceNumber)) {
+          return;
+        }
+        const storeParts = [option?.store?.chain, option?.store?.name]
+          .map((part) => (part ? String(part).trim() : ''))
+          .filter(Boolean);
+        rows.push({
+          store: storeParts.join(' ') || 'Unknown store',
+          price: priceNumber,
+          distanceKm: typeof option?.distance_m === 'number' ? option.distance_m / 1000 : undefined,
+        });
+      });
+      setPriceRows(rows);
+      if (data.cheapest_overall) {
+        const cheapestPriceNumber = toPriceNumber(data.cheapest_overall.price);
+        setCheapest({
+          store: data.cheapest_overall.store?.name || data.cheapest_overall.store?.chain,
+          price: Number.isFinite(cheapestPriceNumber) ? cheapestPriceNumber : undefined,
+        });
+      } else if (rows.length) {
+        const [firstRow, ...restRows] = rows;
+        const minRow = restRows.reduce((min, row) => (row.price < min.price ? row : min), firstRow);
+        setCheapest({ store: minRow.store, price: minRow.price });
+      } else {
+        setCheapest({});
+      }
+      const priceValues = rows.map((row) => row.price).filter((value) => Number.isFinite(value));
+      if (priceValues.length && rows.length) {
+        const cheapestPrice = Math.min(...priceValues);
+        const distanceSorted = rows
+          .filter((row) => typeof row.distanceKm === 'number')
+          .sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
+        const nearest = distanceSorted[0] ?? rows[0];
+        let savings: number | null = null;
+        if (nearest && Number.isFinite(nearest.price)) {
+          savings = Math.max(0, nearest.price - cheapestPrice);
+        } else if (priceValues.length >= 2) {
+          const sortedPrices = [...priceValues].sort((a, b) => a - b);
+          const mid = Math.floor(sortedPrices.length / 2);
+          const median = sortedPrices.length % 2 ? sortedPrices[mid] : (sortedPrices[mid - 1] + sortedPrices[mid]) / 2;
+          savings = Math.max(0, median - cheapestPrice);
+        }
+        setPotentialSavings(savings && savings > 0 ? savings : null);
+      } else {
+        setPotentialSavings(null);
+      }
+      openBottomSheet();
+    } catch (error) {
+      console.warn('[ScanSubmitScreen] getPricesByGTIN failed:', error);
+      const message = (error && typeof error === 'object' && 'message' in error) ? String((error as any).message) : 'Failed to fetch prices';
+      Alert.alert('Scan error', message);
+      setProductSize(null);
+      setScanning(true);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -239,19 +467,24 @@ export default function ScanSubmitScreen() {
     setSelectedStore('');
     setProductId(undefined);
     setLoading(false);
+    setGtin('');
+    setScanning(true);
+    setPriceRows([]);
+    setCheapest({});
+    setPotentialSavings(null);
+    setProductSize(null);
+    sheetY.setValue(screenH);
+    sheetYRef.current = screenH;
+    lastScanTimeRef.current = 0;
   };
-
   const handleWrongPrice = () => {
     if (identifiedProduct) {
       setProductId(identifiedProduct.id);
     }
     setMode('submit');
   };
-
-
   if (mode === 'result' && identifiedProduct) {
     const lowestPrice = Math.min(...storePrices.map(p => p.price));
-    
     return (
       <SafeAreaView style={styles.container}>
           <View style={[styles.header, { marginTop: headerMargin }]}>
@@ -263,7 +496,6 @@ export default function ScanSubmitScreen() {
               />
             </View>
           </View>
-
         <View style={[styles.mainContent, styles.resultContainer]}>
           <View style={styles.resultContentWrapper}>
             <ScrollView 
@@ -280,7 +512,6 @@ export default function ScanSubmitScreen() {
                   />
                 </View>
               </View>
-
             <View style={styles.section}>
               <Text style={styles.sectionTitle}>Prices Near You</Text>
               {storePrices.length > 0 ? (
@@ -301,7 +532,6 @@ export default function ScanSubmitScreen() {
                 </View>
               )}
             </View>
-
             <TouchableOpacity style={styles.correctionButton} onPress={handleWrongPrice}>
               <Text style={styles.correctionButtonText}>Wrong price? Submit a correction</Text>
             </TouchableOpacity>
@@ -311,7 +541,77 @@ export default function ScanSubmitScreen() {
       </SafeAreaView>
     );
   }
-
+  if (mode === 'scanner') {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={[styles.header, { marginTop: headerMargin }]}>
+          <View style={styles.headerRow}>
+            <Text style={styles.title}>Scan Barcode</Text>
+            <LocationIndicator
+              variant="compact"
+              containerStyle={[styles.locationPill, { alignSelf: 'auto', marginBottom: 0 }]}
+            />
+          </View>
+        </View>
+        <View style={styles.scannerContainer}>
+          <CameraView
+            onBarcodeScanned={scanning ? onBarCodeScanned : undefined}
+            style={StyleSheet.absoluteFillObject}
+            barcodeScannerSettings={{
+              barcodeTypes: ['ean13', 'ean8', 'upc_a', 'qr'],
+            }}
+          />
+          <Animated.View
+            style={[styles.quickCompareSheet, { transform: [{ translateY: sheetY }] }]}
+            {...panResponder.panHandlers}
+          >
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetHeading}>
+              {(identifiedProduct?.name_with_brand ?? 'Product').trim()}
+            </Text>
+            {gtin ? <Text style={styles.sheetSubheading}>GTIN {gtin}</Text> : null}
+            {typeof productSize === 'number' && productSize > 0 ? (
+              <Text style={styles.sheetMeta}>{productSize} g</Text>
+            ) : null}
+            {cheapest?.store && typeof cheapest?.price === 'number' ? (
+              <View style={styles.cheapestPill}>
+                <Text style={styles.cheapestPillText}>
+                  Cheapest nearby: {cheapest.store} - ${cheapest.price.toFixed(2)}
+                </Text>
+              </View>
+            ) : null}
+            {potentialSavings !== null ? (
+              <Text style={styles.savingsText}>
+                Potential savings up to ${potentialSavings.toFixed(2)}
+              </Text>
+            ) : null}
+            <View style={styles.storeList}>
+              {priceRows.map((row, index) => (
+                <View key={`${row.store}-${index}`} style={styles.storeRow}>
+                  <View>
+                    <Text style={styles.storeName}>{row.store}</Text>
+                    {typeof row.distanceKm === 'number' && (
+                      <Text style={styles.storeDistance}>{row.distanceKm.toFixed(1)} km away</Text>
+                    )}
+                  </View>
+                  <Text style={styles.storePrice}>${row.price.toFixed(2)}</Text>
+                </View>
+              ))}
+              {priceRows.length === 0 && (
+                <Text style={styles.emptyNearbyText}>No nearby prices yet.</Text>
+              )}
+            </View>
+          </Animated.View>
+        </View>
+        {loading && (
+          <View style={styles.loadingOverlay}>
+            <ActivityIndicator size="large" color="#fff" />
+            <Text style={styles.loadingText}>Loading...</Text>
+          </View>
+        )}
+      </SafeAreaView>
+    );
+  }
   if (mode === 'submit') {
     return (
       <SafeAreaView style={styles.container}>
@@ -324,7 +624,6 @@ export default function ScanSubmitScreen() {
               />
             </View>
           </View>
-
         <View style={styles.mainContent}>
           <ScrollView 
             style={styles.resultScrollView} 
@@ -339,7 +638,6 @@ export default function ScanSubmitScreen() {
                 </View>
               </View>
             )}
-
             <View style={styles.form}>
               <Text style={styles.label}>Store *</Text>
               <View style={styles.storeSelector}>
@@ -355,7 +653,6 @@ export default function ScanSubmitScreen() {
                   <Picker.Item label="Other..." value="other" />
                 </Picker>
               </View>
-
               {selectedStore === 'other' && (
                 <TextInput
                   style={styles.input}
@@ -364,7 +661,6 @@ export default function ScanSubmitScreen() {
                   placeholder="Enter store name"
                 />
               )}
-
               <Text style={styles.label}>Price *</Text>
               <TextInput
                 style={styles.input}
@@ -373,7 +669,6 @@ export default function ScanSubmitScreen() {
                 placeholder="e.g., 4.50"
                 keyboardType="numeric"
               />
-
               <Text style={styles.label}>Note (optional)</Text>
               <TextInput
                 style={[styles.input, styles.textArea]}
@@ -383,7 +678,6 @@ export default function ScanSubmitScreen() {
                 multiline
                 numberOfLines={3}
               />
-
               <TouchableOpacity 
                 style={[styles.submitButton, loading && styles.submitButtonDisabled]} 
                 onPress={submitPriceCorrection}
@@ -401,7 +695,6 @@ export default function ScanSubmitScreen() {
       </SafeAreaView>
     );
   }
-
   return (
     <SafeAreaView style={styles.container}>
         <View style={[styles.header, { marginTop: headerMargin }]}>
@@ -413,7 +706,6 @@ export default function ScanSubmitScreen() {
             />
           </View>
         </View>
-
       <View style={styles.mainContent}>
         <View style={styles.welcomeSection}>
           <View style={styles.welcomeIcon}>
@@ -424,30 +716,36 @@ export default function ScanSubmitScreen() {
             Identify butter products by scanning them, or help improve our data by submitting shelf photos with prices
           </Text>
         </View>
-
-        <View style={styles.featuresSection}>
-          <View style={styles.featureItem}>
-            <View style={[styles.featureIcon, { backgroundColor: 'rgba(245, 158, 11, 0.1)' }]}>
-              <Ionicons name="camera" size={24} color="#f59e0b" />
-            </View>
-            <View style={styles.featureContent}>
-              <Text style={styles.featureTitle}>Scan Product</Text>
-              <Text style={styles.featureDescription}>Take a photo to identify the product and see nearby prices</Text>
-            </View>
+      <View style={styles.featuresSection}>
+        <View style={styles.featureItem}>
+          <View style={[styles.featureIcon, { backgroundColor: 'rgba(245, 158, 11, 0.1)' }]}>
+            <Ionicons name="camera" size={24} color="#f59e0b" />
           </View>
-
-          <View style={styles.featureItem}>
-            <View style={[styles.featureIcon, { backgroundColor: 'rgba(16, 185, 129, 0.1)' }]}>
-              <Ionicons name="cloud-upload" size={24} color="#10B981" />
-            </View>
-            <View style={styles.featureContent}>
-              <Text style={styles.featureTitle}>Submit Price</Text>
+          <View style={styles.featureContent}>
+            <Text style={styles.featureTitle}>Scan Product</Text>
+            <Text style={styles.featureDescription}>Take a photo to identify the product and see nearby prices</Text>
+          </View>
+        </View>
+        <View style={styles.featureItem}>
+          <View style={[styles.featureIcon, { backgroundColor: 'rgba(99, 102, 241, 0.1)' }]}>
+            <Ionicons name="barcode-outline" size={24} color="#6366F1" />
+          </View>
+          <View style={styles.featureContent}>
+            <Text style={styles.featureTitle}>Scan Barcode</Text>
+            <Text style={styles.featureDescription}>Scan GTIN barcodes for a quick price submission</Text>
+          </View>
+        </View>
+        <View style={styles.featureItem}>
+          <View style={[styles.featureIcon, { backgroundColor: 'rgba(16, 185, 129, 0.1)' }]}>
+            <Ionicons name="cloud-upload" size={24} color="#10B981" />
+          </View>
+          <View style={styles.featureContent}>
+            <Text style={styles.featureTitle}>Submit Price</Text>
               <Text style={styles.featureDescription}>Upload shelf photos with prices to help improve our database</Text>
             </View>
           </View>
         </View>
       </View>
-
       {/* Bottom Action Buttons */}
       <View style={styles.bottomButtonContainer}>
         <TouchableOpacity style={styles.bottomPrimaryButton} onPress={handleScanProduct}>
@@ -456,7 +754,12 @@ export default function ScanSubmitScreen() {
             <Text style={styles.bottomPrimaryButtonText}>Scan Product</Text>
           </View>
         </TouchableOpacity>
-
+        <TouchableOpacity style={[styles.bottomPrimaryButton, styles.bottomBarcodeButton]} onPress={openBarcodeScanner}>
+          <View style={styles.bottomButtonContent}>
+            <Ionicons name="barcode-outline" size={22} color="#fff" />
+            <Text style={styles.bottomPrimaryButtonText}>Scan Barcode</Text>
+          </View>
+        </TouchableOpacity>
         <TouchableOpacity style={styles.bottomSecondaryButton} onPress={handleSubmitPricePhoto}>
           <View style={styles.bottomButtonContent}>
             <Ionicons name="cloud-upload-outline" size={20} color="#6366F1" />
@@ -464,7 +767,6 @@ export default function ScanSubmitScreen() {
           </View>
         </TouchableOpacity>
       </View>
-
       {loading && (
         <View style={styles.loadingOverlay}>
           <ActivityIndicator size="large" color="#f59e0b" />
@@ -474,7 +776,6 @@ export default function ScanSubmitScreen() {
     </SafeAreaView>
   );
 }
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -633,6 +934,10 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 8,
   },
+  bottomBarcodeButton: {
+    backgroundColor: '#6366F1',
+    shadowColor: '#6366F1',
+  },
   bottomSecondaryButton: {
     backgroundColor: tokens.colors.card,
     borderRadius: tokens.radius.xl,
@@ -661,6 +966,101 @@ const styles = StyleSheet.create({
     fontSize: tokens.text.h3,
     fontWeight: '700',
     color: '#6366F1',
+  },
+  scannerContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+    position: 'relative',
+  },
+  quickCompareSheet: {
+    position: 'absolute',
+    left: tokens.spacing.pad,
+    right: tokens.spacing.pad,
+    bottom: 0,
+    height: Math.round(Dimensions.get('window').height * 0.7),
+    backgroundColor: tokens.colors.card,
+    borderTopLeftRadius: tokens.radius.xl,
+    borderTopRightRadius: tokens.radius.xl,
+    paddingHorizontal: tokens.spacing.lg,
+    paddingTop: tokens.spacing.lg,
+    paddingBottom: tokens.spacing.xl,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+  },
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 48,
+    height: 5,
+    borderRadius: 999,
+    backgroundColor: '#d1d5db',
+    marginBottom: tokens.spacing.md,
+  },
+  sheetHeading: {
+    fontSize: tokens.text.h2,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+  },
+  sheetSubheading: {
+    marginTop: tokens.spacing.xs,
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink2,
+  },
+  sheetMeta: {
+    marginTop: tokens.spacing.xs,
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink2,
+    marginBottom: tokens.spacing.sm,
+  },
+  savingsText: {
+    color: tokens.colors.ink,
+    fontWeight: '600',
+    marginBottom: tokens.spacing.md,
+  },
+  cheapestPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#e8f5e9',
+    borderRadius: 999,
+    paddingVertical: 6,
+    paddingHorizontal: tokens.spacing.md,
+    marginBottom: tokens.spacing.sm,
+  },
+  cheapestPillText: {
+    color: '#1b5e20',
+    fontWeight: '600',
+    fontSize: tokens.text.body,
+  },
+  storeList: {
+    marginTop: tokens.spacing.lg,
+    gap: tokens.spacing.md,
+  },
+  storeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: tokens.spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: tokens.colors.line,
+  },
+  storeName: {
+    fontSize: tokens.text.body,
+    fontWeight: '600',
+    color: tokens.colors.ink,
+  },
+  storeDistance: {
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink2,
+    marginTop: tokens.spacing.xs / 2,
+  },
+  storePrice: {
+    fontSize: tokens.text.h3,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+  },
+  emptyNearbyText: {
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink2,
+    textAlign: 'center',
+    marginTop: tokens.spacing.md,
   },
   // Result view styles
   section: {
@@ -782,8 +1182,3 @@ const styles = StyleSheet.create({
     marginTop: tokens.spacing.md,
   },
 });
-
-
-
-
-

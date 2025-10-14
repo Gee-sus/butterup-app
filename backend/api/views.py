@@ -22,6 +22,7 @@ from typing import List, Dict
 import os
 import hashlib
 from collections import OrderedDict
+from decimal import Decimal, InvalidOperation
 
 from .models import (
     Store, Product, Price, EconomicIndicator, PriceAlert, EmailSubscription,
@@ -44,6 +45,7 @@ from .services.image_cache import ImageCacheService
 from .services.off_client import OFFClient
 from .services.gs1_client import GS1Client
 from .tasks import fetch_product_image
+from .utils.gtin import normalize_gtin
 
 logger = logging.getLogger(__name__)
 
@@ -711,6 +713,181 @@ class ImageUploadView(APIView):
         return Response(data, status=status.HTTP_201_CREATED)
 
 
+class ScanSubmitAPIView(APIView):
+    """
+    Accepts a photo + barcode + location (+ typed price) and stores a contribution.
+    """
+
+    parser_classes = (MultiPartParser, FormParser)
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        # 1) Validate inputs
+        upload = request.FILES.get("photo")
+        gtin_raw = (request.data.get("gtin") or "").strip()
+        lat = request.data.get("lat")
+        lng = request.data.get("lng")
+        price_text = (request.data.get("price_text") or "").strip()
+
+        if not gtin_raw:
+            return Response({"detail": "gtin required"}, status=400)
+        if not lat or not lng:
+            return Response({"detail": "lat and lng required"}, status=400)
+
+        try:
+            latf = float(lat)
+            lngf = float(lng)
+        except ValueError:
+            return Response({"detail": "lat/lng invalid"}, status=400)
+
+        # 2) Product by GTIN-14
+        try:
+            gtin14 = normalize_gtin(gtin_raw)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        product, _ = Product.objects.get_or_create(
+            gtin=gtin14,
+            defaults={"name": "", "brand": "", "weight_grams": 0, "is_active": True},
+        )
+
+        # 3) Nearest store (300 m radius default)
+        from .utils.geo import nearest_store
+        stores = Store.objects.filter(latitude__isnull=False, longitude__isnull=False)
+        store, distance_m = nearest_store(stores, latf, lngf, radius_m=300.0)
+        if not store:
+            return Response({"detail": "No nearby store found within 300m"}, status=400)
+
+        # 4) Save photo (optional)
+        asset = None
+        if upload:
+            asset = ImageAsset.objects.create(
+                product=product,
+                store=store,
+                source="UPLOAD",
+                alt_text=f"{product.name or 'Unknown product'} at {store.name}",
+            )
+            asset.file.save(upload.name, upload, save=True)
+
+        # 5) Parse price (typed MVP)
+        if not price_text:
+            return Response({"detail": "price_text required for now"}, status=400)
+        try:
+            price_val = Decimal(price_text.replace("$", "").replace(",", ""))
+        except InvalidOperation:
+            return Response({"detail": "price_text invalid"}, status=400)
+
+        # 6) Create contribution (upserts Price via existing logic)
+        PriceContribution.objects.create(
+            user=request.user if request.user and request.user.is_authenticated else None,
+            product=product,
+            store=store,
+            price=price_val,
+            unit="each",
+            is_verified=False,
+        )
+
+        Price.objects.update_or_create(
+            store=store,
+            product=product,
+            defaults={
+                "price": price_val,
+                "price_per_kg": (
+                    (price_val * Decimal(1000)) / Decimal(product.weight_grams)
+                    if product.weight_grams
+                    else None
+                ),
+                "is_on_special": False,
+                "special_price": None,
+                "special_end_date": None,
+            },
+        )
+
+        # 7) Compute cheapest & nearby list (latest per store)
+        latest_by_store = {}
+        prices = (
+            Price.objects.filter(product=product)
+            .select_related("store")
+            .order_by("store_id", "-recorded_at")
+        )
+        for price_obj in prices:
+            if price_obj.store_id not in latest_by_store:
+                latest_by_store[price_obj.store_id] = price_obj
+
+        nearby = []
+        from .utils.geo import haversine_m
+        for price_obj in latest_by_store.values():
+            store_obj = price_obj.store
+            if store_obj.latitude is None or store_obj.longitude is None:
+                continue
+            dist = haversine_m(latf, lngf, store_obj.latitude, store_obj.longitude)
+            if dist is None or dist > 5000.0:
+                continue
+            nearby.append(
+                {
+                    "store": {
+                        "id": store_obj.id,
+                        "chain": store_obj.chain,
+                        "name": store_obj.name,
+                    },
+                    "price": str(price_obj.price),
+                    "distance_m": round(dist, 1),
+                }
+            )
+        nearby.sort(key=lambda entry: (Decimal(entry["price"]), entry["distance_m"]))
+        nearby = nearby[:10]
+
+        cheapest = None
+        if latest_by_store:
+            cheapest_price = min(latest_by_store.values(), key=lambda obj: obj.price)
+            cheapest = {
+                "store": {
+                    "id": cheapest_price.store.id,
+                    "chain": cheapest_price.store.chain,
+                    "name": cheapest_price.store.name,
+                },
+                "price": str(cheapest_price.price),
+            }
+
+        # 8) Response payload
+        return Response(
+            {
+                "product": {
+                    "id": product.id,
+                    "name": product.name,
+                    "brand": product.brand,
+                    "gtin": product.gtin,
+                    "size_grams": product.weight_grams,
+                },
+                "observed": {
+                    "store": {
+                        "id": store.id,
+                        "chain": store.chain,
+                        "name": store.name,
+                    },
+                    "distance_m": round(distance_m, 1),
+                    "price": str(price_val),
+                    "unit_cents_per_100g": (
+                        int(
+                            round(
+                                (
+                                    (price_val * Decimal(100)) / Decimal(product.weight_grams)
+                                )
+                                * 100
+                            )
+                        )
+                        if product.weight_grams
+                        else None
+                    ),
+                },
+                "cheapest_overall": cheapest,
+                "nearby_options": nearby,
+                "image_asset_id": asset.id if asset else None,
+            },
+            status=201,
+        )
+
+
 class NutritionProfileViewSet(RequestContextMixin, viewsets.ReadOnlyModelViewSet):
     queryset = NutritionProfile.objects.all()
     serializer_class = NutritionProfileSerializer
@@ -1059,3 +1236,105 @@ class ProductRatingSubmitAPIView(RequestContextMixin, APIView):
             'rating': ProductUserRatingSerializer(rating).data,
             'product': detail_serializer.data,
         }, status=status.HTTP_200_OK)
+
+
+class PricesByGTINView(APIView):
+    """Get product prices by GTIN (barcode) with nearby stores"""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        gtin = request.GET.get('gtin', '').strip()
+        lat_str = request.GET.get('lat', '')
+        lng_str = request.GET.get('lng', '')
+        radius_m = int(request.GET.get('radius_m', 5000))
+
+        if not gtin:
+            return Response({'detail': 'GTIN is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            lat = float(lat_str)
+            lng = float(lng_str)
+        except (ValueError, TypeError):
+            return Response({'detail': 'Valid lat/lng coordinates are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Normalize GTIN
+        try:
+            normalized_gtin = normalize_gtin(gtin)
+        except ValueError as e:
+            return Response({
+                'detail': f'Invalid barcode: {str(e)}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Find product by GTIN
+        product = Product.objects.filter(gtin=normalized_gtin, is_active=True).first()
+        
+        if not product:
+            return Response({
+                'detail': f'Product with GTIN {gtin} not found in our database'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Get all stores
+        from .utils.geo import haversine_m
+        stores = list(Store.objects.all())
+        
+        # Calculate distances and find stores within radius
+        nearby_stores = []
+        for store in stores:
+            if store.latitude is not None and store.longitude is not None:
+                distance_m = haversine_m(lat, lng, store.latitude, store.longitude)
+                if distance_m <= radius_m:
+                    nearby_stores.append({
+                        'store': store,
+                        'distance_m': distance_m
+                    })
+        
+        # Sort by distance
+        nearby_stores.sort(key=lambda x: x['distance_m'])
+        
+        # Get latest prices for these stores
+        nearby_options = []
+        cheapest_overall = None
+        cheapest_price = None
+        
+        for item in nearby_stores:
+            store = item['store']
+            distance_m = item['distance_m']
+            
+            # Get latest price for this product at this store
+            price_obj = Price.objects.filter(
+                product=product,
+                store=store
+            ).order_by('-recorded_at').first()
+            
+            if price_obj:
+                price_value = float(price_obj.price)
+                
+                nearby_options.append({
+                    'store': {
+                        'id': store.id,
+                        'chain': store.chain,
+                        'name': store.name,
+                        'address': store.address or '',
+                        'city': store.city or '',
+                    },
+                    'price': price_value,
+                    'distance_m': distance_m,
+                    'recorded_at': price_obj.recorded_at.isoformat() if price_obj.recorded_at else None,
+                })
+                
+                # Track cheapest
+                if cheapest_price is None or price_value < cheapest_price:
+                    cheapest_price = price_value
+                    cheapest_overall = nearby_options[-1]
+        
+        return Response({
+            'product': {
+                'id': product.id,
+                'name': product.name,
+                'brand': product.brand,
+                'gtin': product.gtin,
+                'size_grams': product.weight_grams,
+            },
+            'nearby_options': nearby_options,
+            'cheapest_overall': cheapest_overall,
+        })

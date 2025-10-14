@@ -1,4 +1,4 @@
-import { API_URLS } from '../config';
+import { API_URLS, API_BASE_URL } from '../config';
 import { normalizeStoreName } from '../utils/stores';
 
 // Mock data - fallback when backend is not available
@@ -230,6 +230,41 @@ export type ProductRatingPayload = {
 };
 
 // New API methods for scan & submit functionality
+export async function getPricesByGTIN({ gtin, lat, lng, radius_m = 5000, token }: {
+  gtin: string;
+  lat: number;
+  lng: number;
+  radius_m?: number;
+  token?: string;
+}) {
+  const normalizedGtin = gtin.trim();
+  const params = new URLSearchParams({
+    gtin: normalizedGtin,
+    lat: lat.toString(),
+    lng: lng.toString(),
+    radius_m: radius_m.toString(),
+  });
+
+  const url = `${API_BASE_URL}/api/products/prices-by-gtin/?${params.toString()}`;
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+
+  const response = await fetch(url, { headers });
+  const json = await response.json();
+  if (!response.ok) {
+    throw new Error(json?.detail || 'Failed to fetch prices');
+  }
+
+  return json as {
+    product: { id: number; name?: string; brand?: string; gtin: string; size_grams?: number | null };
+    cheapest_overall?: { store: { id: number; chain: string; name: string }; price: string };
+    nearby_options: Array<{
+      store: { id: number; chain: string; name: string };
+      price: string | number;
+      distance_m?: number;
+    }>;
+  };
+}
+
 export const scanApi = {
   // Uploads image, (lat,lng) optional; server identifies product
   identifyByPhoto: async (fileUri: string, opts?: { lat?: number; lng?: number }) => {
@@ -355,6 +390,45 @@ export const scanApi = {
       throw new Error(`Failed to submit correction: ${response.status}`);
     } catch (error) {
       console.warn('[scanApi] Submit price correction failed:', error);
+      throw error;
+    }
+  },
+
+  submitScan: async (payload: { gtin: string; priceText: string; lat: number; lng: number; photoUri?: string }) => {
+    const baseUrl = API_URLS.SCAN || 'http://localhost:8000/api/scan/';
+    try {
+      console.log(`[scanApi] Submitting barcode scan for GTIN: ${payload.gtin}`);
+      const formData = new FormData();
+      formData.append('gtin', payload.gtin);
+      formData.append('price_text', payload.priceText);
+      formData.append('lat', payload.lat.toString());
+      formData.append('lng', payload.lng.toString());
+      if (payload.photoUri) {
+        formData.append('photo', {
+          uri: payload.photoUri,
+          type: 'image/jpeg',
+          name: 'shelf.jpg',
+        } as any);
+      }
+
+      const response = await fetch(`${baseUrl}submit/`, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return data;
+      }
+
+      const message = await response.text();
+      console.warn(`[scanApi] submitScan failed with status ${response.status}: ${message}`);
+      throw new Error(message || `Failed to submit scan: ${response.status}`);
+    } catch (error) {
+      console.warn('[scanApi] submitScan error:', error);
       throw error;
     }
   },
