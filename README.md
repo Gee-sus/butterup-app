@@ -131,6 +131,70 @@ ButterUp/
 - Add more supermarket chains
 - Enhance mobile app with push notifications
 
+## Assistant Tools Available
+
+These tools are used by the in-repo AI assistant (in Cursor) to work on this codebase. They are not part of the runtime app.
+
+- **`functions.codebase_search`**: semantic code search
+  - **Use for**: finding how/where functionality works across the repo
+  - **Avoid**: exact text matches (prefer `functions.grep`)
+
+- **`functions.grep`**: exact string/regex search
+  - **Use for**: symbol names, imports, precise patterns; respects `.gitignore`
+  - **Avoid**: broad “how does X work?” queries (prefer `functions.codebase_search`)
+
+- **`functions.read_file`**: read file contents (text/images)
+  - **Use for**: inspecting specific files before editing
+  - **Avoid**: listing directories (prefer `functions.list_dir`)
+
+- **`functions.list_dir`**: list directory contents
+  - **Use for**: quick structure overviews
+  - **Avoid**: searching by name pattern (prefer `functions.glob_file_search`)
+
+- **`functions.glob_file_search`**: find files by glob pattern
+  - **Use for**: locating files by extension/name across folders
+  - **Avoid**: content search (prefer `functions.grep` or `functions.codebase_search`)
+
+- **`functions.apply_patch`**: structured file edits via diffs
+  - **Use for**: reliable, reviewable code/document edits
+  - **Note**: re-read files before large/iterative edits to keep context fresh
+
+- **`functions.edit_file`**: direct edit helper (fallback)
+  - **Use for**: small, targeted changes when a structured diff is impractical
+  - **Avoid**: multi-hunk edits (prefer `functions.apply_patch`)
+
+- **`functions.delete_file`**: remove a file
+  - **Use for**: deleting generated or obsolete files
+  - **Avoid**: directories (not supported)
+
+- **`functions.read_lints`**: read linter/type-check diagnostics
+  - **Use for**: validating edited files are clean
+  - **Avoid**: non-code files (may not apply)
+
+- **`functions.edit_notebook`**: edit Jupyter notebook cells
+  - **Use for**: modifying `.ipynb` notebooks in-place
+  - **Avoid**: plain markdown/code files
+
+- **`functions.todo_write`**: manage a structured TODO list
+  - **Use for**: tracking multi-step implementation tasks
+  - **Avoid**: trivial, single-step changes
+
+- **`functions.update_memory`**: manage assistant memory
+  - **Use for**: storing user-requested preferences/notes
+  - **Avoid**: saving without explicit user consent
+
+- **`functions.web_search`**: web lookups for up-to-date info
+  - **Use for**: external references, breaking changes, recent docs
+  - **Avoid**: internal code questions
+
+- **`functions.run_terminal_cmd`**: propose/run non-interactive shell commands
+  - **Use for**: installs, scripts, and commands that do not require prompts
+  - **Avoid**: long-running foreground jobs (run in background), interactive prompts
+
+- **`multi_tool_use.parallel`**: run tool calls concurrently
+  - **Use for**: parallel searches/reads across files to speed up discovery
+  - **Avoid**: dependent steps where order matters
+
 ## Contributing
 
 1. Fork the repository
