@@ -117,11 +117,9 @@ class Product(models.Model):
     @property
     def brand_display_name(self):
         """Get the display name for the brand using the Brand database"""
-        try:
-            from api.utils.brand_extractor import BrandExtractor
-            return BrandExtractor.extract_brand_from_name(self.brand)
-        except Exception:
-            return self.brand
+        # Simplify: use the stored brand string as-is; if blank, show 'Unknown'
+        brand_value = (self.brand or '').strip()
+        return brand_value if brand_value else 'Unknown'
 
     @property
     def primary_image(self):

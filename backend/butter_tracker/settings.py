@@ -19,15 +19,16 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-your-secret-key-here')
 DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
 
 # Get ALLOWED_HOSTS from environment or use default
-default_hosts = "127.0.0.1,localhost,10.0.2.2,192.168.1.3"
+default_hosts = "127.0.0.1,localhost,10.0.2.2,192.168.1.6,"
 env_hosts = os.getenv("ALLOWED_HOSTS", default_hosts)
 
 # Always include our IP address for mobile app access
-required_hosts = ["192.168.1.3", "10.0.2.2"]  # Android emulator IPs
+required_hosts = ["10.0.2.2", "192.168.1.6"]  # Android emulator IPs
 all_hosts = env_hosts.split(",") + required_hosts
 ALLOWED_HOSTS = list(set([host.strip() for host in all_hosts if host.strip()]))  # Remove duplicates and whitespace
 
 print(f"DEBUG: ALLOWED_HOSTS = {ALLOWED_HOSTS}")  # Debug print
+
 
 # Application definition
 INSTALLED_APPS = [
