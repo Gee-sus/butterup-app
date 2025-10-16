@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework_simplejwt',
+    'drf_spectacular',
     'corsheaders',
     'django_filters',
     'api',
@@ -128,6 +129,10 @@ IMAGE_CACHE_TTL_HOURS = int(os.getenv('IMAGE_CACHE_TTL_HOURS', '168'))  # 7 days
 # Open Food Facts settings
 OFF_BASE = os.getenv('OFF_BASE', 'https://world.openfoodfacts.org')
 OFF_USER_AGENT = os.getenv('OFF_USER_AGENT', 'ButterUp/0.1 (contact: support@butterup.nz)')
+OFF_CONNECT_TIMEOUT = float(os.getenv('OFF_CONNECT_TIMEOUT', '3.0'))
+OFF_READ_TIMEOUT = float(os.getenv('OFF_READ_TIMEOUT', '10.0'))
+OFF_CACHE_TIMEOUT = int(os.getenv('OFF_CACHE_TIMEOUT', '3600'))
+OFF_CACHE_PREFIX = os.getenv('OFF_CACHE_PREFIX', 'off-cache')
 
 # GS1 NZ settings (placeholder)
 GS1_BASE = os.getenv('GS1_BASE', 'https://api.gs1nz.example')
@@ -152,6 +157,18 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',
     ],
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_THROTTLE_RATES': {
+        'off_anon': '30/min',
+        'off_user': '60/min',
+    },
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'ButterUp API',
+    'DESCRIPTION': 'API documentation for ButterUp services.',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
 }
 
 # CORS settings - Allow all localhost ports and Expo LAN IPs

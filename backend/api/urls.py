@@ -25,7 +25,7 @@ router.register(r'nutrition', views.NutritionProfileViewSet, basename='nutrition
 router.register(r'list/items', views.ListItemViewSet, basename='list-item')
 router.register(r'contributions', views.PriceContributionViewSet, basename='contribution')
 
-urlpatterns = [
+urlpatterns += [
     path('', include(router.urls)),
     path('products/', views.ProductListView.as_view(), name='products-list'),
     path('products/<slug:slug>/detail/', views.ProductDetailAPIView.as_view(), name='product-detail'),
@@ -36,4 +36,8 @@ urlpatterns = [
     path('cheapest/', views.CheapestView.as_view(), name='cheapest'),
     path('quick-compare/', views.QuickCompareView.as_view(), name='quick-compare'),
     path('me/', views.UserProfileView.as_view(), name='user-profile'),
-] 
+    path('off/product/<str:code>/', views.OFFProductDetailView.as_view(), name='off-product-detail'),
+    path('off/search/', views.OFFProductSearchView.as_view(), name='off-product-search'),
+    path('off/batch/', views.OFFProductBatchView.as_view(), name='off-product-batch'),
+    path('health/', views.HealthCheckView.as_view(), name='health-check'),
+]

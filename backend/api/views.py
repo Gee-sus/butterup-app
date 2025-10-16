@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticatedOrReadOnly, IsAuthenticate
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Avg, Min, Max, Count, Q
 from django.utils import timezone
@@ -13,12 +14,13 @@ from django.shortcuts import get_object_or_404
 from django.http import Http404
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
+from django.conf import settings
 from rest_framework_simplejwt.tokens import RefreshToken
 import requests
 from jose import jwt
 from jose.exceptions import JWTError
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
 import os
 import hashlib
 from collections import OrderedDict
@@ -48,6 +50,18 @@ from .tasks import fetch_product_image
 from .utils.gtin import normalize_gtin
 
 logger = logging.getLogger(__name__)
+off_client = OFFClient()
+
+
+def _parse_fields_param(raw: Optional[str]) -> Optional[List[str]]:
+    if not raw:
+        return None
+    fields = [part.strip() for part in raw.split(",") if part.strip()]
+    return fields or None
+
+
+OFF_MAX_PAGE_SIZE = 50
+OFF_MAX_BATCH_SIZE = 50
 
 
 def _gravatar_url(email: str) -> str:
@@ -1338,3 +1352,116 @@ class PricesByGTINView(APIView):
             'nearby_options': nearby_options,
             'cheapest_overall': cheapest_overall,
         })
+
+
+class OFFAnonRateThrottle(AnonRateThrottle):
+    scope = "off_anon"
+
+
+class OFFUserRateThrottle(UserRateThrottle):
+    scope = "off_user"
+
+
+class HealthCheckView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        return Response({"status": "ok"})
+
+
+class OFFProductDetailView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [OFFAnonRateThrottle, OFFUserRateThrottle]
+
+    def get(self, request, code: str):
+        fields = _parse_fields_param(request.query_params.get("fields"))
+        product = off_client.get_product(code, fields=fields)
+        if not product:
+            return Response({"error": "NOT_FOUND"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(product)
+
+
+class OFFProductSearchView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [OFFAnonRateThrottle, OFFUserRateThrottle]
+
+    def get(self, request, *args, **kwargs):
+        query = (request.query_params.get("q") or "").strip()
+        if not query:
+            return Response(
+                {"detail": "Query parameter 'q' is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        page_raw = request.query_params.get("page", "1")
+        page_size_raw = request.query_params.get("page_size", str(settings.REST_FRAMEWORK.get("PAGE_SIZE", 20)))
+
+        try:
+            page = max(1, int(page_raw))
+        except (TypeError, ValueError):
+            return Response({"detail": "Parameter 'page' must be a positive integer."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            page_size = int(page_size_raw)
+        except (TypeError, ValueError):
+            return Response({"detail": "Parameter 'page_size' must be a positive integer."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if page_size < 1:
+            return Response({"detail": "Parameter 'page_size' must be at least 1."}, status=status.HTTP_400_BAD_REQUEST)
+        if page_size > OFF_MAX_PAGE_SIZE:
+            return Response(
+                {"detail": f"Parameter 'page_size' cannot exceed {OFF_MAX_PAGE_SIZE}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        fields = _parse_fields_param(request.query_params.get("fields"))
+        brands = request.query_params.get("brands")
+        categories = request.query_params.get("categories")
+
+        results = off_client.search_products(
+            query,
+            page=page,
+            page_size=page_size,
+            brands=brands,
+            categories=categories,
+            fields=fields,
+        )
+        return Response(results)
+
+
+class OFFProductBatchView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [OFFAnonRateThrottle, OFFUserRateThrottle]
+
+    def post(self, request, *args, **kwargs):
+        if not isinstance(request.data, dict):
+            return Response(
+                {"detail": 'Request body must be a JSON object with a "codes" list.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        codes = request.data.get("codes")
+        if not isinstance(codes, list):
+            return Response({"detail": '"codes" must be a list of product codes.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not codes:
+            return Response({"detail": '"codes" list cannot be empty.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if len(codes) > OFF_MAX_BATCH_SIZE:
+            return Response(
+                {"detail": f'"codes" list cannot exceed {OFF_MAX_BATCH_SIZE} items.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Fields may be provided as query param or within the request body.
+        fields = _parse_fields_param(request.query_params.get("fields"))
+        if not fields:
+            body_fields = request.data.get("fields")
+            if isinstance(body_fields, list):
+                fields = [str(field).strip() for field in body_fields if str(field).strip()]
+                fields = fields or None
+            elif isinstance(body_fields, str):
+                fields = _parse_fields_param(body_fields)
+
+        result = off_client.get_products_batch(codes, fields=fields)
+        return Response(result)
