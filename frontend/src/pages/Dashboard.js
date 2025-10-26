@@ -8,7 +8,6 @@ import {
 } from '@heroicons/react/24/outline';
 import axios from 'axios';
 import toast from 'react-hot-toast';
-import { mockPrices, mockAnalytics } from '../mockData';
 
 const Dashboard = () => {
   const [latestPrices, setLatestPrices] = useState([]);
@@ -68,20 +67,20 @@ const Dashboard = () => {
 
     } catch (error) {
       console.error('Error fetching dashboard data:', error);
-      console.log('Using mock data instead...');
+      console.log('Backend API not available');
       
-      // Use mock data when API fails
-      setLatestPrices(mockPrices);
+      // Show empty state when API fails
+      setLatestPrices([]);
       setStats({
-        totalProducts: mockAnalytics.total_products,
-        avgPrice: mockAnalytics.avg_price.toFixed(2),
-        priceChange: mockAnalytics.price_change,
-        storesTracked: mockAnalytics.stores_tracked
+        totalProducts: 0,
+        avgPrice: 0,
+        priceChange: '0%',
+        storesTracked: 0
       });
-      setUsingMockData(true);
+      setUsingMockData(false);
       setDataFreshness(null);
       
-      toast.error('Using demo data - backend not available');
+      toast.error('Backend not available - please check connection');
     } finally {
       setLoading(false);
     }

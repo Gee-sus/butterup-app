@@ -46,7 +46,7 @@ INSTALLED_APPS = [
     'api',
     'pricing',
     'scraper',
-    'tasks',
+    'photo_compare',
 ]
 
 MIDDLEWARE = [
@@ -159,6 +159,7 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_THROTTLE_RATES': {
+        'anon': '60/min',
         'off_anon': '30/min',
         'off_user': '60/min',
     },

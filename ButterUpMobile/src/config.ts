@@ -31,6 +31,10 @@ export const API_ENDPOINTS = {
   QUICK_COMPARE: "/api/quick-compare/",
   PROFILE: "/api/me/",
   SCAN: "/api/scan/",
+  OFF_PRODUCT: "/api/off/product/",
+  OFF_SEARCH: "/api/off/search/",
+  OFF_BATCH: "/api/off/batch/",
+  HEALTH: "/api/health/",
 } as const;
 
 // Full API URLs
@@ -42,4 +46,8 @@ export const API_URLS = {
   QUICK_COMPARE: `${API_BASE_URL}${API_ENDPOINTS.QUICK_COMPARE}`,
   PROFILE: `${API_BASE_URL}${API_ENDPOINTS.PROFILE}`,
   SCAN: `${API_BASE_URL}${API_ENDPOINTS.SCAN}`,
+  OFF_PRODUCT: `${API_BASE_URL}${API_ENDPOINTS.OFF_PRODUCT}`,
+  OFF_SEARCH: `${API_BASE_URL}${API_ENDPOINTS.OFF_SEARCH}`,
+  OFF_BATCH: `${API_BASE_URL}${API_ENDPOINTS.OFF_BATCH}`,
+  HEALTH: `${API_BASE_URL}${API_ENDPOINTS.HEALTH}`,
 } as const;

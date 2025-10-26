@@ -3,7 +3,6 @@ from django.utils import timezone
 from django.db import transaction
 from api.models import Store, Product, Price, ScrapingLog
 from scraper.scrapers import get_all_scrapers
-from scraper.test_scraper import get_test_scrapers
 import logging
 import traceback
 from datetime import datetime
@@ -21,11 +20,6 @@ class Command(BaseCommand):
             type=str,
             help='Specific stores to scrape (countdown, paknsave, newworld)',
             default=['countdown', 'paknsave', 'newworld']
-        )
-        parser.add_argument(
-            '--test',
-            action='store_true',
-            help='Use test scrapers instead of real scrapers'
         )
         parser.add_argument(
             '--dry-run',
@@ -125,12 +119,8 @@ class Command(BaseCommand):
 
     def _get_scrapers(self, use_test):
         """Get appropriate scrapers"""
-        if use_test:
-            scrapers = get_test_scrapers()
-            self.stdout.write('🧪 Using TEST scrapers (generating sample data)')
-        else:
-            scrapers = get_all_scrapers()
-            self.stdout.write('🌐 Using REAL scrapers (scraping actual websites)')
+        scrapers = get_all_scrapers()
+        self.stdout.write('🌐 Using REAL scrapers (scraping actual websites)')
         
         return scrapers
 
@@ -143,10 +133,7 @@ class Command(BaseCommand):
         for scraper in scrapers:
             # Extract store name from scraper class name
             class_name = scraper.__class__.__name__
-            if 'Test' in class_name:
-                store_name = class_name.replace('TestScraper', '').lower()
-            else:
-                store_name = class_name.replace('Scraper', '').lower()
+            store_name = class_name.replace('Scraper', '').lower()
             
             if store_name not in stores:
                 self.stdout.write(f'⏭️  Skipping {store_name} - not in stores list')

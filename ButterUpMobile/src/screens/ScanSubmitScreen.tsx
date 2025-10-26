@@ -1,4 +1,4 @@
-﻿import React, {useEffect, useRef, useState} from 'react';
+﻿import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
   View,
   Text,
@@ -7,12 +7,12 @@ import {
   TextInput,
   Alert,
   ScrollView,
-  SafeAreaView,
   ActivityIndicator,
   Platform,
   Dimensions,
   Animated,
   PanResponder,
+  Image,
 } from 'react-native';
 import {Ionicons} from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -21,26 +21,104 @@ import * as Haptics from 'expo-haptics';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
-import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import {SafeAreaView, useSafeAreaInsets} from 'react-native-safe-area-context';
 import {useApp} from '../contexts/AppContext';
 import { Picker } from '@react-native-picker/picker';
 import LocationIndicator from '../components/LocationIndicator';
 import ProductResultCard from '../components/ProductResultCard';
 import StorePriceRow from '../components/StorePriceRow';
-import {scanApi, getPricesByGTIN} from '../services/api';
+import {scanApi, getPricesByGTIN, offApi} from '../services/api';
+import type { OFFProduct } from '../services/api';
 import {tokens} from '../theme/tokens';
 type Mode = 'menu' | 'result' | 'submit' | 'scanner';
-interface IdentifiedProduct {
-  id: number;
-  name_with_brand: string;
-  rating: number;
+type ProductResult = {
+  id?: string | number;
+  name_with_brand?: string;
   image_url?: string;
-}
+  quantity?: string | null;
+  nutriScore?: string | null;
+  nutriments?: any;
+  source?: 'local' | 'off' | 'unknown';
+  size_grams?: number | null;
+};
 interface StorePrice {
   store: string;
   price: number;
   distance_km?: number;
 }
+
+const NUTRIMENT_FIELDS: Array<{ key: string; label: string; unit: string }> = [
+  { key: 'energy_kcal_100g', label: 'Energy (kcal)', unit: 'kcal' },
+  { key: 'energy_kj_100g', label: 'Energy (kJ)', unit: 'kJ' },
+  { key: 'fat_100g', label: 'Fat', unit: 'g' },
+  { key: 'saturated_fat_100g', label: 'Saturated fat', unit: 'g' },
+  { key: 'carbohydrates_100g', label: 'Carbohydrates', unit: 'g' },
+  { key: 'sugars_100g', label: 'Sugars', unit: 'g' },
+  { key: 'fiber_100g', label: 'Fibre', unit: 'g' },
+  { key: 'proteins_100g', label: 'Protein', unit: 'g' },
+  { key: 'salt_100g', label: 'Salt', unit: 'g' },
+  { key: 'sodium_100g', label: 'Sodium', unit: 'g' },
+];
+
+const buildPriceView = (nearbyOptions: any[]) => {
+  const toNum = (value: unknown) => {
+    if (typeof value === 'number') {
+      return value;
+    }
+    const parsed = parseFloat(String(value ?? '').replace(/[^0-9.]/g, ''));
+    return Number.isFinite(parsed) ? parsed : NaN;
+  };
+
+  const rows = (nearbyOptions || [])
+    .map((option: any) => {
+      const price = toNum(option?.price);
+      if (!Number.isFinite(price)) {
+        return null;
+      }
+      const store = [option?.store?.chain, option?.store?.name]
+        .filter(Boolean)
+        .join(' ') || 'Unknown store';
+      const distanceKm = typeof option?.distance_m === 'number'
+        ? option.distance_m / 1000
+        : undefined;
+      return { store, price, distanceKm };
+    })
+    .filter(Boolean) as Array<{ store: string; price: number; distanceKm?: number }>;
+
+  let cheapest: { store?: string; price?: number } = {};
+  let potentialSavings: number | null = null;
+
+  if (rows.length) {
+    const cheapestRow = rows.reduce(
+      (min, row) => (row.price < min.price ? row : min),
+      rows[0]
+    );
+    cheapest = { store: cheapestRow.store, price: cheapestRow.price };
+
+    const nearest = rows
+      .filter((row) => typeof row.distanceKm === 'number')
+      .sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity))[0];
+
+    const cheapestPrice = cheapestRow.price;
+    if (nearest) {
+      potentialSavings = Math.max(0, nearest.price - cheapestPrice);
+    } else if (rows.length >= 2) {
+      const prices = rows.map((row) => row.price).sort((a, b) => a - b);
+      const mid = Math.floor(prices.length / 2);
+      const median =
+        prices.length % 2 === 1
+          ? prices[mid]
+          : (prices[mid - 1] + prices[mid]) / 2;
+      potentialSavings = Math.max(0, median - cheapestPrice);
+    }
+    if (potentialSavings === 0) {
+      potentialSavings = null;
+    }
+  }
+
+  return { rows, cheapest, potentialSavings };
+};
+
 const MAIN_STORES = ["Pak'nSave", "Woolworths", "New World"];
 export default function ScanSubmitScreen() {
   const {addToList, showSnackbar} = useApp();
@@ -48,10 +126,11 @@ export default function ScanSubmitScreen() {
   const headerMargin = insets.top + tokens.spacing.md;
   const [cameraPermission, requestBarcodeCameraPermission] = useCameraPermissions();
   const [mode, setMode] = useState<Mode>('menu');
+  const [resultSource, setResultSource] = useState<'photo' | 'barcode' | null>(null);
   const [loading, setLoading] = useState(false);
   const [imageUri, setImageUri] = useState<string | null>(null);
   // Result state
-  const [identifiedProduct, setIdentifiedProduct] = useState<IdentifiedProduct | null>(null);
+  const [identifiedProduct, setIdentifiedProduct] = useState<ProductResult | null>(null);
   const [storePrices, setStorePrices] = useState<StorePrice[]>([]);
   // Submit state
   const [storeName, setStoreName] = useState('');
@@ -66,6 +145,7 @@ export default function ScanSubmitScreen() {
   const [potentialSavings, setPotentialSavings] = useState<number | null>(null);
   const [productSize, setProductSize] = useState<number | null>(null);
   const lastScanTimeRef = useRef<number>(0);
+  const lastIgnoredDataRef = useRef<string>('');
   const screenH = Dimensions.get('window').height;
   const OPEN_Y = Math.round(screenH * 0.34);
   const CLOSED_Y = Math.round(screenH - 120);
@@ -86,6 +166,69 @@ export default function ScanSubmitScreen() {
       sheetYRef.current = screenH;
     }
   }, [mode, screenH, sheetY]);
+  const nutrimentEntries = useMemo(() => {
+    if (!identifiedProduct?.nutriments) {
+      return [];
+    }
+    const entries: Array<{ key: string; label: string; value: string }> = [];
+    NUTRIMENT_FIELDS.forEach(({ key, label, unit }) => {
+      const raw = identifiedProduct.nutriments?.[key];
+      if (typeof raw !== 'number' || Number.isNaN(raw)) {
+        return;
+      }
+      const numericValue = unit === 'kcal' || unit === 'kJ'
+        ? Math.round(raw)
+        : Number.parseFloat(raw.toFixed(1));
+      entries.push({
+        key,
+        label,
+        value: `${numericValue} ${unit}`,
+      });
+    });
+    return entries;
+  }, [identifiedProduct?.nutriments]);
+
+  const fetchOffProduct = (code: string): Promise<OFFProduct | null> =>
+    offApi
+      .getProduct(code, {
+        fields: ['name', 'brand', 'quantity', 'nutriScore', 'nutriments', 'image'],
+      })
+      .then((result) => {
+        if (result.status === 404) {
+          return null;
+        }
+        if (result.error) {
+          console.warn('[ScanSubmitScreen] OFF product lookup error:', result.error);
+        }
+        return result.data ?? null;
+      })
+      .catch((error) => {
+        console.warn('[ScanSubmitScreen] OFF product lookup failed:', error);
+        return null;
+      });
+
+  const mergeOffDetails = (offProduct: OFFProduct | null) => {
+    if (!offProduct) {
+      return;
+    }
+    const fallbackName = `${offProduct.brand ?? ''} ${offProduct.name ?? ''}`.trim() || 'Product';
+    setIdentifiedProduct((prev) => {
+      const base: ProductResult = prev ?? {
+        name_with_brand: fallbackName,
+        source: 'off',
+      };
+
+      return {
+        ...base,
+        name_with_brand: base.name_with_brand || fallbackName,
+        image_url: base.image_url || offProduct.image || undefined,
+        quantity: offProduct.quantity ?? base.quantity ?? null,
+        nutriScore: offProduct.nutriScore ?? base.nutriScore ?? null,
+        nutriments: offProduct.nutriments ?? base.nutriments,
+        source: base.source ?? 'off',
+      };
+    });
+  };
   const requestImagePermission = async () => {
     const {status} = await ImagePicker.requestMediaLibraryPermissionsAsync();
     return status === 'granted';
@@ -152,25 +295,58 @@ export default function ScanSubmitScreen() {
   const identifyProduct = async (uri: string) => {
     setLoading(true);
     try {
-      const location = await getCurrentLocation();
+      setScanning(false);
+      const location = await getCurrentLocation().catch(() => null);
       const identified = await scanApi.identifyByPhoto(uri, location ?? undefined);
-      setIdentifiedProduct(identified);
 
-      const nearby = await scanApi.nearbyPrices(identified.id, location ?? undefined);
-      setStorePrices(Array.isArray(nearby) ? nearby : []);
+      setIdentifiedProduct({
+        id: identified?.id ?? undefined,
+        name_with_brand: identified?.name_with_brand ?? identified?.name ?? 'Product',
+        image_url: identified?.image_url ?? (identified as any)?.image ?? undefined,
+        quantity:
+          identified?.quantity ??
+          (typeof identified?.size_grams === 'number' ? `${identified.size_grams} g` : null),
+        nutriScore: identified?.nutriScore ?? (identified as any)?.nutriscore_grade ?? null,
+        nutriments: identified?.nutriments ?? undefined,
+        source: identified?.source ?? 'unknown',
+        size_grams: typeof identified?.size_grams === 'number' ? identified.size_grams : null,
+      });
+      setProductSize(typeof identified?.size_grams === 'number' ? identified.size_grams : null);
+
+      const nearby = await scanApi.nearbyPrices(identified?.id, location ?? undefined).catch(() => null);
+      const options = Array.isArray(nearby)
+        ? nearby
+        : Array.isArray((nearby as any)?.nearby_options)
+          ? (nearby as any)?.nearby_options
+          : [];
+      const { rows, cheapest: nextCheapest, potentialSavings: nextPotentialSavings } = buildPriceView(options);
+      setPriceRows(rows);
+      setCheapest(nextCheapest);
+      setPotentialSavings(nextPotentialSavings);
+      setStorePrices(
+        rows.map((row) => ({
+          store: row.store,
+          price: row.price,
+          distance_km: typeof row.distanceKm === 'number' ? row.distanceKm : undefined,
+        }))
+      );
+
+      animateSheetTo(CLOSED_Y);
+      setResultSource('photo');
       setMode('result');
     } catch (error) {
+      console.warn('[ScanSubmitScreen] identifyProduct failed:', error);
       Alert.alert(
         'Identification Failed',
-        "We couldn't identify this product. Please try again or submit it manually.",
-        [
-          {text: 'Try Again', style: 'default'},
-          {
-            text: 'Submit Manually',
-            onPress: () => setMode('submit'),
-          },
-        ],
+        "We couldn't identify this product. Showing limited details."
       );
+      setIdentifiedProduct((prev) => prev ?? { name_with_brand: 'Product', source: 'unknown' });
+      setPriceRows([]);
+      setStorePrices([]);
+      setCheapest({});
+      setPotentialSavings(null);
+      setResultSource('photo');
+      setMode('result');
     } finally {
       setLoading(false);
     }
@@ -224,7 +400,7 @@ export default function ScanSubmitScreen() {
     }
   };
 
-  const animateSheetTo = (target: number) => {
+  function animateSheetTo(target: number) {
     Animated.spring(sheetY, {
       toValue: target,
       useNativeDriver: true,
@@ -236,10 +412,7 @@ export default function ScanSubmitScreen() {
         setScanning(true);
       }
     });
-  };
-  const openBottomSheet = () => {
-    animateSheetTo(OPEN_Y);
-  };
+  }
   const panResponder = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dy) > 6,
@@ -277,6 +450,7 @@ export default function ScanSubmitScreen() {
       }
       
       setMode('scanner');
+      setResultSource(null);
       setGtin('');
       setScanning(true);
       setIdentifiedProduct(null);
@@ -308,23 +482,18 @@ export default function ScanSubmitScreen() {
       return;
     }
     
-    // Filter out URLs and QR codes that aren't product barcodes
-    if (rawData.includes('://') || rawData.includes('http') || rawData.includes('www.')) {
-      console.log('[ScanSubmitScreen] Ignoring URL/QR code:', rawData);
-      setScanning(true);
-      return;
-    }
-    
-    const normalizedCode = rawData.replace(/\s+/g, '');
-    if (!normalizedCode) {
-      setScanning(true);
-      return;
-    }
-    
+    const digitsOnly = rawData.replace(/\D/g, '');
+
     // Only accept numeric barcodes of valid lengths (8, 12, 13, or 14 digits)
-    const digitsOnly = normalizedCode.replace(/\D/g, '');
     if (!digitsOnly || ![8, 12, 13, 14].includes(digitsOnly.length)) {
-      console.log('[ScanSubmitScreen] Invalid barcode length:', digitsOnly, 'length:', digitsOnly.length);
+      if (rawData.includes('://') || rawData.includes('http') || rawData.includes('www.')) {
+        if (lastIgnoredDataRef.current !== rawData) {
+          console.log('[ScanSubmitScreen] Ignoring URL/QR code:', rawData);
+          lastIgnoredDataRef.current = rawData;
+        }
+      } else {
+        console.log('[ScanSubmitScreen] Invalid barcode data:', rawData);
+      }
       setScanning(true);
       return;
     }
@@ -333,6 +502,7 @@ export default function ScanSubmitScreen() {
     } catch (err) {
       console.warn('[ScanSubmitScreen] Haptics unavailable:', err);
     }
+    lastIgnoredDataRef.current = '';
     setGtin(digitsOnly);
     const loc = await getCurrentLocation();
     if (!loc?.lat || !loc?.lng) {
@@ -340,83 +510,68 @@ export default function ScanSubmitScreen() {
       setScanning(true);
       return;
     }
+    setLoading(true);
+    setResultSource('barcode');
+    const offPromise = fetchOffProduct(digitsOnly);
     try {
-      setLoading(true);
       const data = await getPricesByGTIN({ gtin: digitsOnly, lat: loc.lat, lng: loc.lng, radius_m: 5000 });
       const nameWithBrand = `${data.product.brand ?? ''} ${data.product.name ?? ''}`.trim() || 'Product';
+      const sizeGrams = typeof data.product.size_grams === 'number' ? data.product.size_grams : null;
+      const productDetails: any = data.product ?? {};
       setIdentifiedProduct({
-        id: data.product.id,
+        id: productDetails.id ?? data.product?.id,
         name_with_brand: nameWithBrand,
-        rating: 0,
-        image_url: undefined,
+        image_url: productDetails.image ?? productDetails.image_url ?? undefined,
+        quantity: typeof sizeGrams === 'number' ? `${sizeGrams} g` : productDetails.quantity ?? null,
+        nutriScore: productDetails.nutriScore ?? productDetails.nutriscore_grade ?? null,
+        nutriments: productDetails.nutriments ?? undefined,
+        source: 'local',
+        size_grams: sizeGrams,
       });
-      setProductSize(data.product.size_grams ?? null);
-      const toPriceNumber = (value: unknown): number => {
-        if (value == null) {
-          return NaN;
-        }
-        if (typeof value === 'number') {
-          return value;
-        }
-        const parsed = parseFloat(String(value).replace(/[^0-9.]/g, ''));
-        return Number.isFinite(parsed) ? parsed : NaN;
-      };
-      const rows: Array<{store: string; price: number; distanceKm?: number}> = [];
-      (data.nearby_options || []).forEach((option) => {
-        const priceNumber = toPriceNumber(option?.price);
-        if (!Number.isFinite(priceNumber)) {
-          return;
-        }
-        const storeParts = [option?.store?.chain, option?.store?.name]
-          .map((part) => (part ? String(part).trim() : ''))
-          .filter(Boolean);
-        rows.push({
-          store: storeParts.join(' ') || 'Unknown store',
-          price: priceNumber,
-          distanceKm: typeof option?.distance_m === 'number' ? option.distance_m / 1000 : undefined,
-        });
-      });
+      setProductSize(sizeGrams);
+
+      const options = data.nearby_options ?? [];
+      const { rows, cheapest: nextCheapest, potentialSavings: nextPotentialSavings } = buildPriceView(options);
       setPriceRows(rows);
-      if (data.cheapest_overall) {
-        const cheapestPriceNumber = toPriceNumber(data.cheapest_overall.price);
-        setCheapest({
-          store: data.cheapest_overall.store?.name || data.cheapest_overall.store?.chain,
-          price: Number.isFinite(cheapestPriceNumber) ? cheapestPriceNumber : undefined,
-        });
-      } else if (rows.length) {
-        const [firstRow, ...restRows] = rows;
-        const minRow = restRows.reduce((min, row) => (row.price < min.price ? row : min), firstRow);
-        setCheapest({ store: minRow.store, price: minRow.price });
-      } else {
-        setCheapest({});
-      }
-      const priceValues = rows.map((row) => row.price).filter((value) => Number.isFinite(value));
-      if (priceValues.length && rows.length) {
-        const cheapestPrice = Math.min(...priceValues);
-        const distanceSorted = rows
-          .filter((row) => typeof row.distanceKm === 'number')
-          .sort((a, b) => (a.distanceKm ?? Infinity) - (b.distanceKm ?? Infinity));
-        const nearest = distanceSorted[0] ?? rows[0];
-        let savings: number | null = null;
-        if (nearest && Number.isFinite(nearest.price)) {
-          savings = Math.max(0, nearest.price - cheapestPrice);
-        } else if (priceValues.length >= 2) {
-          const sortedPrices = [...priceValues].sort((a, b) => a - b);
-          const mid = Math.floor(sortedPrices.length / 2);
-          const median = sortedPrices.length % 2 ? sortedPrices[mid] : (sortedPrices[mid - 1] + sortedPrices[mid]) / 2;
-          savings = Math.max(0, median - cheapestPrice);
-        }
-        setPotentialSavings(savings && savings > 0 ? savings : null);
-      } else {
-        setPotentialSavings(null);
-      }
-      openBottomSheet();
+      setCheapest(nextCheapest);
+      setPotentialSavings(nextPotentialSavings);
+      setStorePrices(
+        rows.map((row) => ({
+          store: row.store,
+          price: row.price,
+          distance_km: typeof row.distanceKm === 'number' ? row.distanceKm : undefined,
+        }))
+      );
+      setResultSource('barcode');
+      animateSheetTo(OPEN_Y);
+      const offProduct = await offPromise;
+      mergeOffDetails(offProduct);
     } catch (error) {
       console.warn('[ScanSubmitScreen] getPricesByGTIN failed:', error);
-      const message = (error && typeof error === 'object' && 'message' in error) ? String((error as any).message) : 'Failed to fetch prices';
-      Alert.alert('Scan error', message);
-      setProductSize(null);
-      setScanning(true);
+      const message = (error && typeof error === 'object' && 'message' in error)
+        ? String((error as any).message)
+        : 'Failed to fetch prices';
+      let handled = false;
+      const offProduct = await offPromise;
+      if (offProduct) {
+        mergeOffDetails(offProduct);
+        setStorePrices([]);
+        setPriceRows([]);
+        setCheapest({});
+        setPotentialSavings(null);
+        setProductSize(null);
+        setResultSource('barcode');
+        animateSheetTo(OPEN_Y);
+        if (typeof showSnackbar === 'function') {
+          showSnackbar('No ButterUp prices yet - showing Open Food Facts details.');
+        }
+        handled = true;
+      }
+      if (!handled) {
+        Alert.alert('Scan error', message);
+        setProductSize(null);
+        setScanning(true);
+      }
     } finally {
       setLoading(false);
     }
@@ -458,6 +613,7 @@ export default function ScanSubmitScreen() {
 
   const resetToMenu = () => {
     setMode('menu');
+    setResultSource(null);
     setImageUri(null);
     setIdentifiedProduct(null);
     setStorePrices([]);
@@ -476,67 +632,247 @@ export default function ScanSubmitScreen() {
     sheetY.setValue(screenH);
     sheetYRef.current = screenH;
     lastScanTimeRef.current = 0;
+    lastIgnoredDataRef.current = '';
   };
   const handleWrongPrice = () => {
-    if (identifiedProduct) {
+    if (identifiedProduct?.id) {
       setProductId(identifiedProduct.id);
+    } else {
+      setProductId(undefined);
     }
     setMode('submit');
   };
-  if (mode === 'result' && identifiedProduct) {
-    const lowestPrice = Math.min(...storePrices.map(p => p.price));
-    return (
-      <SafeAreaView style={styles.container}>
+  if (mode === 'result') {
+    if (resultSource === 'photo') {
+      const sortedPriceRows = [...priceRows].sort(
+        (a, b) =>
+          a.price - b.price ||
+          (a.distanceKm ?? Number.POSITIVE_INFINITY) - (b.distanceKm ?? Number.POSITIVE_INFINITY)
+      );
+
+      return (
+        <SafeAreaView style={styles.container}>
+          <View style={[styles.photoHeader, { marginTop: headerMargin }]}>
+            <TouchableOpacity style={styles.photoHeaderButton} onPress={resetToMenu}>
+              <Text style={styles.photoHeaderButtonText}>Back</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.photoHeaderButton}
+              onPress={() => {
+                void openBarcodeScanner();
+              }}
+            >
+              <Text style={styles.photoHeaderButtonText}>Rescan</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView
+            contentContainerStyle={styles.photoScrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {!!identifiedProduct?.image_url && (
+              <Image source={{ uri: identifiedProduct.image_url }} style={styles.photoImage} />
+            )}
+            <Text style={styles.photoTitle}>{identifiedProduct?.name_with_brand ?? 'Product'}</Text>
+            {!!identifiedProduct?.quantity && (
+              <Text style={styles.photoSubtitle}>{identifiedProduct.quantity}</Text>
+            )}
+            {typeof productSize === 'number' && !identifiedProduct?.quantity && (
+              <Text style={styles.photoSubtitle}>{productSize} g</Text>
+            )}
+
+            {(cheapest?.price != null || (potentialSavings != null && potentialSavings > 0)) && (
+              <View style={styles.photoChipRow}>
+                {cheapest?.price != null && (
+                  <View style={styles.photoChip}>
+                    <Text style={styles.photoChipText}>
+                      {`Cheapest nearby: ${cheapest.store ?? 'Unknown'} - $${(cheapest.price ?? 0).toFixed(2)}`}
+                    </Text>
+                  </View>
+                )}
+                {potentialSavings != null && potentialSavings > 0 && (
+                  <View style={styles.photoChip}>
+                    <Text style={styles.photoChipText}>
+                      {`Potential savings up to $${potentialSavings.toFixed(2)}`}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            )}
+
+            <View style={styles.photoSection}>
+              <Text style={styles.photoSectionTitle}>Prices Near You</Text>
+              {sortedPriceRows.length ? (
+                sortedPriceRows.map((row, index) => (
+                  <View key={`${row.store}-${index}`} style={styles.photoPriceCard}>
+                    <Text style={styles.photoPriceStore}>{row.store}</Text>
+                    <Text style={styles.photoPriceMeta}>
+                      ${row.price.toFixed(2)}
+                      {typeof row.distanceKm === 'number' ? ` - ${row.distanceKm.toFixed(2)} km` : ''}
+                    </Text>
+                    {cheapest?.price != null && row.price > (cheapest.price ?? Infinity) && (
+                      <Text style={styles.photoPriceSave}>
+                        Save ${(row.price - (cheapest.price ?? row.price)).toFixed(2)} vs. here
+                      </Text>
+                    )}
+                  </View>
+                ))
+              ) : (
+                <View style={styles.photoEmptyCard}>
+                  <Text style={styles.photoEmptyText}>No ButterUp prices yet nearby.</Text>
+                  {identifiedProduct?.source === 'off' && (
+                    <Text style={styles.photoEmptyHint}>Showing Open Food Facts details only.</Text>
+                  )}
+                </View>
+              )}
+            </View>
+
+            {nutrimentEntries.length > 0 && (
+              <View style={styles.photoSection}>
+                <Text style={styles.photoSectionTitle}>Nutrition (per 100g)</Text>
+                <View style={styles.photoNutritionCard}>
+                  {nutrimentEntries.map((item) => (
+                    <View key={item.key} style={styles.photoNutritionRow}>
+                      <Text style={styles.photoNutritionLabel}>{item.label}</Text>
+                      <Text style={styles.photoNutritionValue}>{item.value}</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            )}
+
+            <View style={styles.photoActions}>
+              <TouchableOpacity
+                style={[styles.photoActionButton, styles.photoPrimaryAction]}
+                onPress={handleWrongPrice}
+              >
+                <Text style={[styles.photoActionText, styles.photoActionTextPrimary]}>Submit a price</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.photoActionButton}
+                onPress={() => {
+                  void openBarcodeScanner();
+                }}
+              >
+                <Text style={styles.photoActionText}>Scan another product</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        </SafeAreaView>
+      );
+    }
+
+    if (identifiedProduct) {
+      const lowestPrice =
+        storePrices.length > 0
+          ? Math.min(...storePrices.map((p) => p.price))
+          : undefined;
+      return (
+        <SafeAreaView style={styles.container}>
           <View style={[styles.header, { marginTop: headerMargin }]}>
             <View style={styles.headerRow}>
-              <Text style={styles.title}>Product Found</Text>
+              <View style={styles.headerLeft}>
+                <TouchableOpacity
+                  style={styles.headerBackButton}
+                  onPress={resetToMenu}
+                  accessibilityLabel="Back to scan"
+                >
+                  <Ionicons name="chevron-back" size={20} color={tokens.colors.ink} />
+                </TouchableOpacity>
+                <Text style={styles.title}>Product Found</Text>
+              </View>
               <LocationIndicator
                 variant="compact"
                 containerStyle={[styles.locationPill, { alignSelf: 'auto', marginBottom: 0 }]}
               />
             </View>
           </View>
-        <View style={[styles.mainContent, styles.resultContainer]}>
-          <View style={styles.resultContentWrapper}>
-            <ScrollView 
-              style={styles.resultScrollView} 
-              contentContainerStyle={styles.resultScrollContent}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.productResultIsolationWrapper}>
-                <View style={styles.productResultWrapper}>
-                  <ProductResultCard
-                    name={identifiedProduct.name_with_brand}
-                    rating={identifiedProduct.rating}
-                    image_url={identifiedProduct.image_url}
-                  />
-                </View>
-              </View>
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Prices Near You</Text>
-              {storePrices.length > 0 ? (
-                storePrices
-                  .sort((a, b) => a.price - b.price)
-                  .map((storePrice, index) => (
-                    <StorePriceRow
-                      key={index}
-                      store={storePrice.store}
-                      price={storePrice.price}
-                      distance_km={storePrice.distance_km}
-                      isLowest={storePrice.price === lowestPrice}
+          <View style={[styles.mainContent, styles.resultContainer]}>
+            <View style={styles.resultContentWrapper}>
+              <ScrollView
+                style={styles.resultScrollView}
+                contentContainerStyle={styles.resultScrollContent}
+                showsVerticalScrollIndicator={false}
+              >
+                <View style={styles.productResultIsolationWrapper}>
+                  <View style={styles.productResultWrapper}>
+                    <ProductResultCard
+                      name={identifiedProduct.name_with_brand ?? 'Product'}
+                      rating={0}
+                      image_url={identifiedProduct.image_url}
                     />
-                  ))
-              ) : (
-                <View style={styles.emptyState}>
-                  <Text style={styles.emptyText}>No nearby prices yet—be the first to submit!</Text>
+                  </View>
                 </View>
-              )}
+                {identifiedProduct.source === 'off' ? (
+                  <View style={styles.noticeCard}>
+                    <Text style={styles.noticeTitle}>No ButterUp prices yet</Text>
+                    <Text style={styles.noticeMessage}>
+                      We pulled these details from Open Food Facts. Add a price to help the community.
+                    </Text>
+                  </View>
+                ) : null}
+                {(identifiedProduct.quantity || identifiedProduct.nutriScore) ? (
+                  <View style={styles.metaRow}>
+                    {identifiedProduct.quantity ? (
+                      <Text style={styles.metaText}>Package size {identifiedProduct.quantity}</Text>
+                    ) : null}
+                    {identifiedProduct.nutriScore ? (
+                      <View style={styles.nutriScorePill}>
+                        <Text style={styles.nutriScoreLabel}>Nutri-Score</Text>
+                        <Text style={styles.nutriScoreValue}>{identifiedProduct.nutriScore}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                ) : null}
+                {nutrimentEntries.length > 0 ? (
+                  <View style={styles.section}>
+                    <Text style={styles.sectionTitle}>Nutrition (per 100g)</Text>
+                    <View style={styles.nutritionCard}>
+                      {nutrimentEntries.map((item) => (
+                        <View key={item.key} style={styles.nutrientRow}>
+                          <Text style={styles.nutrientLabel}>{item.label}</Text>
+                          <Text style={styles.nutrientValue}>{item.value}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Prices Near You</Text>
+                  {storePrices.length > 0 ? (
+                    storePrices
+                      .sort((a, b) => a.price - b.price)
+                      .map((storePrice, index) => (
+                        <StorePriceRow
+                          key={index}
+                          store={storePrice.store}
+                          price={storePrice.price}
+                          distance_km={storePrice.distance_km}
+                          isLowest={lowestPrice != null ? storePrice.price === lowestPrice : false}
+                        />
+                      ))
+                  ) : (
+                    <View style={styles.emptyState}>
+                      <Text style={styles.emptyText}>No nearby prices yet - be the first to submit!</Text>
+                    </View>
+                  )}
+                </View>
+                <TouchableOpacity style={styles.correctionButton} onPress={handleWrongPrice}>
+                  <Text style={styles.correctionButtonText}>Wrong price? Submit a correction</Text>
+                </TouchableOpacity>
+              </ScrollView>
             </View>
-            <TouchableOpacity style={styles.correctionButton} onPress={handleWrongPrice}>
-              <Text style={styles.correctionButtonText}>Wrong price? Submit a correction</Text>
-            </TouchableOpacity>
-            </ScrollView>
           </View>
+        </SafeAreaView>
+      );
+    }
+
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={[styles.photoHeader, { marginTop: headerMargin }]}>
+          <TouchableOpacity style={styles.photoHeaderButton} onPress={resetToMenu}>
+            <Text style={styles.photoHeaderButtonText}>Back</Text>
+          </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
@@ -569,9 +905,22 @@ export default function ScanSubmitScreen() {
             <Text style={styles.sheetHeading}>
               {(identifiedProduct?.name_with_brand ?? 'Product').trim()}
             </Text>
+            {identifiedProduct?.source === 'off' ? (
+              <Text style={styles.sheetNotice}>
+                No ButterUp prices yet - data from Open Food Facts.
+              </Text>
+            ) : null}
             {gtin ? <Text style={styles.sheetSubheading}>GTIN {gtin}</Text> : null}
             {typeof productSize === 'number' && productSize > 0 ? (
               <Text style={styles.sheetMeta}>{productSize} g</Text>
+            ) : identifiedProduct?.quantity ? (
+              <Text style={styles.sheetMeta}>{identifiedProduct.quantity}</Text>
+            ) : null}
+            {identifiedProduct?.nutriScore ? (
+              <View style={styles.sheetNutriScore}>
+                <Text style={styles.sheetNutriScoreLabel}>Nutri-Score</Text>
+                <Text style={styles.sheetNutriScoreValue}>{identifiedProduct.nutriScore}</Text>
+              </View>
             ) : null}
             {cheapest?.store && typeof cheapest?.price === 'number' ? (
               <View style={styles.cheapestPill}>
@@ -601,6 +950,19 @@ export default function ScanSubmitScreen() {
                 <Text style={styles.emptyNearbyText}>No nearby prices yet.</Text>
               )}
             </View>
+            {nutrimentEntries.length > 0 ? (
+              <>
+                <Text style={styles.sheetNutritionTitle}>Nutrition (per 100g)</Text>
+                <View style={styles.nutritionCard}>
+                  {nutrimentEntries.map((item) => (
+                    <View key={item.key} style={styles.nutrientRow}>
+                      <Text style={styles.nutrientLabel}>{item.label}</Text>
+                      <Text style={styles.nutrientValue}>{item.value}</Text>
+                    </View>
+                  ))}
+                </View>
+              </>
+            ) : null}
           </Animated.View>
         </View>
         {loading && (
@@ -791,6 +1153,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: tokens.spacing.sm,
+  },
+  headerBackButton: {
+    width: 36,
+    height: 36,
+    borderRadius: tokens.radius.full,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+    backgroundColor: tokens.colors.card,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   locationPill: {
     alignSelf: 'flex-end',
     marginBottom: tokens.spacing.md,
@@ -807,6 +1184,158 @@ const styles = StyleSheet.create({
     fontSize: tokens.text.title,
     fontWeight: '700',
     color: tokens.colors.ink,
+  },
+  photoHeader: {
+    paddingHorizontal: tokens.spacing.pad,
+    paddingTop: tokens.spacing.lg,
+    paddingBottom: tokens.spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  photoHeaderButton: {
+    paddingVertical: 6,
+    paddingHorizontal: tokens.spacing.sm,
+  },
+  photoHeaderButtonText: {
+    fontSize: tokens.text.body,
+    fontWeight: '600',
+    color: tokens.colors.ink,
+  },
+  photoScrollContent: {
+    paddingHorizontal: tokens.spacing.pad,
+    paddingBottom: tokens.spacing.xxl,
+    gap: tokens.spacing.lg,
+  },
+  photoImage: {
+    width: '100%',
+    height: 220,
+    borderRadius: tokens.radius.xl,
+    backgroundColor: '#f8fafc',
+  },
+  photoTitle: {
+    fontSize: tokens.text.h2,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+  },
+  photoSubtitle: {
+    marginTop: tokens.spacing.xs,
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink2,
+  },
+  photoChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: tokens.spacing.sm,
+  },
+  photoChip: {
+    paddingVertical: 6,
+    paddingHorizontal: tokens.spacing.md,
+    borderRadius: tokens.radius.full,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+    backgroundColor: tokens.colors.card,
+  },
+  photoChipText: {
+    fontSize: tokens.text.tiny,
+    fontWeight: '600',
+    color: tokens.colors.ink,
+  },
+  photoSection: {
+    gap: tokens.spacing.sm,
+  },
+  photoSectionTitle: {
+    fontSize: tokens.text.h3,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+  },
+  photoPriceCard: {
+    padding: tokens.spacing.md,
+    borderRadius: tokens.radius.lg,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+    backgroundColor: tokens.colors.card,
+    marginBottom: tokens.spacing.sm,
+  },
+  photoPriceStore: {
+    fontSize: tokens.text.body,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+  },
+  photoPriceMeta: {
+    marginTop: 4,
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink2,
+  },
+  photoPriceSave: {
+    marginTop: tokens.spacing.xs,
+    fontSize: tokens.text.tiny,
+    color: '#15803d',
+    fontWeight: '600',
+  },
+  photoEmptyCard: {
+    padding: tokens.spacing.md,
+    borderRadius: tokens.radius.lg,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+    backgroundColor: tokens.colors.card,
+  },
+  photoEmptyText: {
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink,
+    fontWeight: '600',
+  },
+  photoEmptyHint: {
+    marginTop: 4,
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink2,
+  },
+  photoNutritionCard: {
+    borderRadius: tokens.radius.lg,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+    backgroundColor: '#f8fafc',
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.sm,
+    gap: tokens.spacing.xs,
+  },
+  photoNutritionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  photoNutritionLabel: {
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink,
+  },
+  photoNutritionValue: {
+    fontSize: tokens.text.body,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+  },
+  photoActions: {
+    gap: tokens.spacing.sm,
+    marginTop: tokens.spacing.lg,
+  },
+  photoActionButton: {
+    paddingVertical: tokens.spacing.md,
+    borderRadius: tokens.radius.xl,
+    borderWidth: 1,
+    borderColor: tokens.colors.line,
+    backgroundColor: tokens.colors.card,
+    alignItems: 'center',
+  },
+  photoPrimaryAction: {
+    backgroundColor: '#f59e0b',
+    borderColor: '#f59e0b',
+  },
+  photoActionText: {
+    fontSize: tokens.text.body,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+  },
+  photoActionTextPrimary: {
+    color: '#fff',
   },
   mainContent: {
     flex: 1,
@@ -999,17 +1528,50 @@ const styles = StyleSheet.create({
     fontSize: tokens.text.h2,
     fontWeight: '700',
     color: tokens.colors.ink,
+    marginBottom: tokens.spacing.xs,
+  },
+  sheetNotice: {
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink2,
+    marginBottom: tokens.spacing.sm,
   },
   sheetSubheading: {
     marginTop: tokens.spacing.xs,
     fontSize: tokens.text.body,
     color: tokens.colors.ink2,
+    marginBottom: tokens.spacing.xs,
   },
   sheetMeta: {
-    marginTop: tokens.spacing.xs,
     fontSize: tokens.text.body,
     color: tokens.colors.ink2,
     marginBottom: tokens.spacing.sm,
+  },
+  sheetNutritionTitle: {
+    fontSize: tokens.text.body,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+    marginTop: tokens.spacing.lg,
+    marginBottom: tokens.spacing.sm,
+  },
+  sheetNutriScore: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f1f5f9',
+    borderRadius: tokens.radius.full,
+    paddingVertical: 4,
+    paddingHorizontal: tokens.spacing.md,
+    marginBottom: tokens.spacing.sm,
+  },
+  sheetNutriScoreLabel: {
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink2,
+    marginRight: tokens.spacing.xs,
+    fontWeight: '600',
+  },
+  sheetNutriScoreValue: {
+    fontSize: tokens.text.body,
+    fontWeight: '700',
+    color: tokens.colors.ink,
   },
   savingsText: {
     color: tokens.colors.ink,
@@ -1071,6 +1633,81 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: tokens.colors.ink,
     marginBottom: tokens.spacing.md,
+  },
+  nutritionCard: {
+    backgroundColor: '#f8fafc',
+    borderRadius: tokens.radius.lg,
+    paddingVertical: tokens.spacing.md,
+    paddingHorizontal: tokens.spacing.lg,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    gap: tokens.spacing.sm,
+  },
+  nutrientRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 2,
+  },
+  nutrientLabel: {
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink,
+    fontWeight: '500',
+  },
+  nutrientValue: {
+    fontSize: tokens.text.body,
+    color: tokens.colors.ink,
+    fontWeight: '700',
+  },
+  noticeCard: {
+    backgroundColor: '#ecfeff',
+    borderRadius: tokens.radius.lg,
+    padding: tokens.spacing.lg,
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+    marginBottom: tokens.spacing.lg,
+  },
+  noticeTitle: {
+    fontSize: tokens.text.body,
+    fontWeight: '700',
+    color: tokens.colors.ink,
+    marginBottom: tokens.spacing.xs,
+  },
+  noticeMessage: {
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink2,
+  },
+  metaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    marginBottom: tokens.spacing.lg,
+  },
+  metaText: {
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink2,
+    marginRight: tokens.spacing.md,
+    marginBottom: tokens.spacing.xs,
+  },
+  nutriScorePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f1f5f9',
+    borderRadius: tokens.radius.full,
+    paddingVertical: 4,
+    paddingHorizontal: tokens.spacing.md,
+    marginBottom: tokens.spacing.xs,
+  },
+  nutriScoreLabel: {
+    fontSize: tokens.text.tiny,
+    color: tokens.colors.ink2,
+    marginRight: tokens.spacing.xs,
+    fontWeight: '600',
+  },
+  nutriScoreValue: {
+    fontSize: tokens.text.body,
+    fontWeight: '700',
+    color: tokens.colors.ink,
   },
   emptyState: {
     backgroundColor: tokens.colors.card,
