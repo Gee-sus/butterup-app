@@ -1,5 +1,27 @@
+import axios from 'axios';
 import { API_URLS, API_BASE_URL } from '../config';
 import { normalizeStoreName } from '../utils/stores';
+
+// Create axios instance with default config
+const api = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 10000, // 10 second timeout
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
+// Add response interceptor for logging
+api.interceptors.response.use(
+  (response) => {
+    console.log(`[axios] ✓ ${response.config.method?.toUpperCase()} ${response.config.url} - ${response.status}`);
+    return response;
+  },
+  (error) => {
+    console.warn(`[axios] ✗ ${error.config?.method?.toUpperCase()} ${error.config?.url} - ${error.response?.status || 'Network Error'}`);
+    return Promise.reject(error);
+  }
+);
 
 // Mock data - fallback when backend is not available
 const mockProducts = [
@@ -66,6 +88,220 @@ const mockProducts = [
 ];
 
 const MAIN_STORES = ["Pak'nSave", "Woolworths", "New World"];
+
+const OFF_FIELD_WHITELIST = ['code', 'name', 'brand', 'quantity', 'nutriScore', 'nutriments', 'image'] as const;
+type OFFField = typeof OFF_FIELD_WHITELIST[number];
+
+export interface OFFProduct {
+  code: string;
+  name?: string | null;
+  brand?: string | null;
+  quantity?: string | null;
+  nutriScore?: string | null;
+  nutriments?: Record<string, number>;
+  image?: string | null;
+}
+
+export interface OFFSearchHit {
+  code: string;
+  name?: string | null;
+  brand?: string | null;
+  image?: string | null;
+  [key: string]: unknown;
+}
+
+export interface OFFSearchResponse {
+  count: number;
+  page: number;
+  page_size: number;
+  items: OFFSearchHit[];
+}
+
+export interface OFFBatchResponse {
+  items: OFFProduct[];
+  not_found: string[];
+  invalid?: string[];
+}
+
+interface ApiResult<T> {
+  data: T | null;
+  error?: Error;
+  status?: number;
+}
+
+const normaliseOffFields = (fields?: string[]): OFFField[] => {
+  if (!fields) return [];
+  const allowed = new Set<OFFField>(OFF_FIELD_WHITELIST);
+  const result: OFFField[] = [];
+  fields.forEach((field) => {
+    const trimmed = (field ?? '').toString().trim() as OFFField;
+    if (allowed.has(trimmed) && !result.includes(trimmed)) {
+      result.push(trimmed);
+    }
+  });
+  return result;
+};
+
+const buildQueryString = (params: Record<string, string | undefined>): string => {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value) {
+      search.append(key, value);
+    }
+  });
+  const query = search.toString();
+  return query ? `?${query}` : '';
+};
+
+const parseJsonQuietly = async <T>(response: Response): Promise<T | null> => {
+  try {
+    return await response.json();
+  } catch (_err) {
+    return null;
+  }
+};
+
+const buildErrorFromResponse = async (response: Response): Promise<Error> => {
+  const payload = await parseJsonQuietly<Record<string, unknown>>(response);
+  const detail = typeof payload === 'object' && payload
+    ? (payload.detail || payload.error || payload.message)
+    : undefined;
+  const message = typeof detail === 'string' && detail.trim().length > 0
+    ? detail.trim()
+    : `HTTP ${response.status}: ${response.statusText || 'Request failed'}`;
+  return new Error(message);
+};
+
+export const healthApi = {
+  ping: async (): Promise<ApiResult<{ status: string }>> => {
+    try {
+      const response = await fetch(API_URLS.HEALTH);
+      if (response.ok) {
+        const data = await parseJsonQuietly<{ status: string }>(response);
+        return { data: data ?? null, status: response.status };
+      }
+      const error = await buildErrorFromResponse(response);
+      return { data: null, error, status: response.status };
+    } catch (error) {
+      console.warn('[healthApi] ping failed:', error);
+      return { data: null, error: error as Error };
+    }
+  },
+};
+
+export const offApi = {
+  getProduct: async (
+    code: string,
+    opts?: { fields?: string[]; signal?: AbortSignal },
+  ): Promise<ApiResult<OFFProduct>> => {
+    const normalizedCode = (code || '').trim();
+    if (!normalizedCode) {
+      return { data: null, error: new Error('Product code is required.') };
+    }
+
+    const fields = normaliseOffFields(opts?.fields);
+    const url = `${API_URLS.OFF_PRODUCT}${encodeURIComponent(normalizedCode)}/`;
+    try {
+      const response = await fetch(`${url}${buildQueryString({ fields: fields.length ? fields.join(',') : undefined })}`, {
+        signal: opts?.signal,
+      });
+
+      if (response.status === 404) {
+        return { data: null, status: 404 };
+      }
+
+      if (!response.ok) {
+        const error = await buildErrorFromResponse(response);
+        return { data: null, error, status: response.status };
+      }
+
+      const payload = await parseJsonQuietly<OFFProduct>(response);
+      return { data: payload, status: response.status };
+    } catch (error) {
+      console.warn('[offApi] getProduct failed:', error);
+      return { data: null, error: error as Error };
+    }
+  },
+
+  search: async (params: {
+    query: string;
+    page?: number;
+    pageSize?: number;
+    brands?: string;
+    categories?: string;
+    fields?: string[];
+    signal?: AbortSignal;
+  }): Promise<ApiResult<OFFSearchResponse>> => {
+    const q = (params.query || '').trim();
+    if (!q) {
+      return { data: null, error: new Error('Search query is required.') };
+    }
+
+    const fields = normaliseOffFields(params.fields);
+    const url = `${API_URLS.OFF_SEARCH}${buildQueryString({
+      q,
+      page: params.page ? Math.max(1, params.page).toString() : undefined,
+      page_size: params.pageSize ? Math.max(1, params.pageSize).toString() : undefined,
+      brands: params.brands?.trim() || undefined,
+      categories: params.categories?.trim() || undefined,
+      fields: fields.length ? fields.join(',') : undefined,
+    })}`;
+
+    try {
+      const response = await fetch(url, { signal: params.signal });
+      if (!response.ok) {
+        const error = await buildErrorFromResponse(response);
+        return { data: null, error, status: response.status };
+      }
+
+      const payload = await parseJsonQuietly<OFFSearchResponse>(response);
+      return { data: payload, status: response.status };
+    } catch (error) {
+      console.warn('[offApi] search failed:', error);
+      return { data: null, error: error as Error };
+    }
+  },
+
+  batch: async (
+    codes: string[],
+    opts?: { fields?: string[]; signal?: AbortSignal },
+  ): Promise<ApiResult<OFFBatchResponse>> => {
+    const normalizedCodes = Array.isArray(codes)
+      ? codes.map((code) => code.trim()).filter(Boolean)
+      : [];
+
+    if (!normalizedCodes.length) {
+      return { data: null, error: new Error('At least one product code is required.') };
+    }
+
+    const fields = normaliseOffFields(opts?.fields);
+
+    try {
+      const response = await fetch(API_URLS.OFF_BATCH, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          codes: normalizedCodes,
+          ...(fields.length ? { fields } : {}),
+        }),
+        signal: opts?.signal,
+      });
+
+      if (!response.ok) {
+        const error = await buildErrorFromResponse(response);
+        return { data: null, error, status: response.status };
+      }
+
+      const payload = await parseJsonQuietly<OFFBatchResponse>(response);
+      return { data: payload, status: response.status };
+    } catch (error) {
+      console.warn('[offApi] batch failed:', error);
+      return { data: null, error: error as Error };
+    }
+  },
+};
 
 const buildHeaders = (guestUser?: string) => ({
   'Content-Type': 'application/json',
@@ -199,21 +435,10 @@ export const userApi = {
   getProfile: async () => {
     try {
       console.log(`[api] Loading user profile from: ${API_URLS.PROFILE}`);
-      const response = await fetch(API_URLS.PROFILE, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`[api] Loaded user profile: ${data.name}`);
-        return { data };
-      }
-
-      console.warn(`[api] Profile API returned ${response.status}, using mock data`);
-      return { data: { name: 'User', email: 'user@example.com', avatar_url: '', provider: 'local' } };
+      const response = await api.get(API_URLS.PROFILE);
+      
+      console.log(`[api] Loaded user profile: ${response.data.name}`);
+      return { data: response.data };
     } catch (error) {
       console.warn('[api] Profile API failed, using mock data:', error);
       return { data: { name: 'User', email: 'user@example.com', avatar_url: '', provider: 'local' } };
@@ -251,7 +476,13 @@ export async function getPricesByGTIN({ gtin, lat, lng, radius_m = 5000, token }
   const response = await fetch(url, { headers });
   const json = await response.json();
   if (!response.ok) {
-    throw new Error(json?.detail || 'Failed to fetch prices');
+    const message =
+      (json && typeof json === 'object' ? (json as any).detail || (json as any).error : null) ||
+      'Failed to fetch prices';
+    const error = new Error(message) as Error & { status?: number; payload?: unknown };
+    error.status = response.status;
+    error.payload = json;
+    throw error;
   }
 
   return json as {
@@ -499,21 +730,10 @@ export const productApi = {
   list: async (opts?: { category?: string }) => {
     try {
       console.log(`[api] Loading products from: ${API_URLS.PRODUCTS}`);
-      const response = await fetch(API_URLS.PRODUCTS, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      const response = await api.get(API_URLS.PRODUCTS);
 
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`[api] Loaded ${data.results?.length || data.length || 0} products from backend`);
-        return { data: data.results || data };
-      }
-
-      console.warn(`[api] Products API returned ${response.status}, using mock data`);
-      return { data: mockProducts };
+      console.log(`[api] Loaded ${response.data.results?.length || response.data.length || 0} products from backend`);
+      return { data: response.data.results || response.data };
     } catch (error) {
       console.warn('[api] Products API failed, using mock data:', error);
       return { data: mockProducts };
@@ -522,20 +742,8 @@ export const productApi = {
 
   compare: async (ids?: (string | number)[]) => {
     try {
-      const response = await fetch(API_URLS.CHEAPEST, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        return { data: data.results || data };
-      }
-
-      console.warn('[api] Cheapest API returned non-200, using mock data');
-      return { data: mockProducts };
+      const response = await api.get(API_URLS.CHEAPEST);
+      return { data: response.data.results || response.data };
     } catch (error) {
       console.warn('[api] Cheapest API failed, using mock data:', error);
       return { data: mockProducts };
@@ -545,28 +753,17 @@ export const productApi = {
   quickCompare: async () => {
     try {
       console.log(`[api] Loading quick compare rows from: ${API_URLS.QUICK_COMPARE}`);
-      const response = await fetch(API_URLS.QUICK_COMPARE, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      const response = await api.get(API_URLS.QUICK_COMPARE);
 
-      if (response.ok) {
-        const data = await response.json();
-        const rows = data?.results ?? data;
-        const rowCount = Array.isArray(rows) ? rows.length : 0;
-        console.log(`[api] Loaded ${rowCount} quick compare rows`);
+      const rows = response.data?.results ?? response.data;
+      const rowCount = Array.isArray(rows) ? rows.length : 0;
+      console.log(`[api] Loaded ${rowCount} quick compare rows`);
 
-        if (Array.isArray(rows) && rowCount > 0) {
-          return { data: normaliseQuickCompareRows(rows) };
-        }
-
-        console.warn('[api] Quick compare API returned an empty payload, using mock data');
-        return { data: normaliseQuickCompareRows(buildMockQuickCompare()) };
+      if (Array.isArray(rows) && rowCount > 0) {
+        return { data: normaliseQuickCompareRows(rows) };
       }
 
-      console.warn(`[api] Quick compare API returned ${response.status}, using mock data`);
+      console.warn('[api] Quick compare API returned an empty payload, using mock data');
       return { data: normaliseQuickCompareRows(buildMockQuickCompare()) };
     } catch (error) {
       console.warn('[api] Quick compare API failed, using mock data:', error);
